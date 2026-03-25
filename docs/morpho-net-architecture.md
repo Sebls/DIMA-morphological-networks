@@ -1,383 +1,153 @@
-# Research Framework Architecture (Simplified)
+# Research framework architecture (morpho-net)
 
-Think of the project as a **lightweight research framework for morphological neural networks**.
-Each module isolates one responsibility so you can **iterate quickly on architectures, optimizers, and experiments** without unnecessary complexity.
+Lightweight layout for **morphological neural network** experiments: clear split between **config**, **model definition**, **training strategy**, and **analysis**, with reproducibility via snapshotted YAML.
 
-The goal is:
+Design goals:
 
-- fast experimentation
-- reproducibility
-- modular components
-- clean post-training analysis
-
----
-
-# 1. config/
-
-Purpose: **single experiment configuration (source of truth)**
-
-This folder contains a **single `config.yaml`** used to define how experiments are executed.
-Instead of managing multiple config files, you edit this file and it is **copied into each experiment folder at runtime**.
-
-Typical contents:
-
-- training hyperparameters
-- dataset parameters
-- model parameters
-- initialization settings
-- optimizer configuration
-- logging options
-- experiment metadata
-
-Example sections:
-
-- dataset (size, preprocessing, splits)
-- model (type, kernel size, number of erosions)
-- training (batch size, learning rate, epochs)
-- initialization (ranges or strategies)
-- seed and reproducibility settings
-
-Practices:
-
-- configurations are declarative (no Python logic)
-- the config used for each run is **snapshotted in `experiments/`**
-- experiments are fully reproducible from saved configs
-
-Requirements:
-
-- reproducibility via config snapshotting
-- version control of the base config
-- deterministic seeds when possible
+- fast experimentation (swap architectures, initializers, training procedures from config)
+- reproducibility (frozen config per run)
+- modular components (registries for new methods without editing the experiment runner)
+- post-training analysis (Pareto, kernel plots)
 
 ---
 
-# 2. scripts/
+## 1. `morpho-net/config/`
 
-Purpose: **entry points for running the project**
+**Purpose:** experiment definitions (source of truth).
 
-This folder contains executable scripts that orchestrate experiments.
+- YAML files per experiment; **`extends`** merges a base (e.g. `base.yaml`) via `morpho_net.utils.config.load_config`.
+- Typical sections: `dataset`, `ground_truth`, `model`, `initialization`, `training`, `callbacks`, `output`, `experiment`.
+- Each run copies the **resolved** config into the experiment output folder.
 
-Typical scripts:
-
-- `train.py` → main training pipeline
-- `evaluate.py` → evaluation of trained models
-- `run_experiment.py` → optional wrapper for automation
-
-Responsibilities:
-
-- load configuration
-- create experiment directory
-- copy config into experiment folder
-- call dataset, model, and training modules
-
-Practices:
-
-- minimal logic
-- delegate all work to `src/`
-- CLI-friendly
+Practices: declarative only; seeds and paths live in YAML where possible.
 
 ---
 
-# 3. src/data/
+## 2. `morpho-net/morpho_net/` — Python package
 
-Purpose: **data loading and preprocessing**
+### Entry points
 
-This module prepares datasets for training.
+- **`main.py`** — CLI: `uv run train --config …` (see project `pyproject.toml` scripts).
+- **`evaluate.py`** — load `config.yaml` + weights from an experiment directory and report metrics.
 
-Responsibilities:
+### `experiments/`
 
-- loading datasets (e.g., Fashion-MNIST)
-- preprocessing (normalization, formatting)
-- train/validation split
-- batching
-
-Structure:
-
-- `dataset.py`
-- `preprocessing.py`
-
-Practices:
-
-- no model logic
-- deterministic behavior when seeded
-- reusable pipelines across experiments
-
-Requirements:
-
-- consistent tensor shapes
-- reproducible splits
-- standardized normalization
+- **`run_experiment.py`** — orchestration: load config → data → ground truth → `build_model` → `run_training` → metrics, plots, checkpoints.
 
 ---
 
-# 4. src/layers/
+## 3. `morpho_net/data/`
 
-Purpose: **core morphological operators (main research contribution)**
+**Purpose:** data loading and targets.
 
-This is the **most important module**.
+- Dataset loading (e.g. Fashion-MNIST with optional noise), splits.
+- Ground-truth filter application for supervised targets.
 
-It contains reusable implementations of morphological layers.
-
-Typical layers:
-
-- erosion
-- dilation
-- supremum of erosions
-- soft approximations
-
-Structure:
-
-- one file per operator
-- each implemented as a reusable class
-
-Practices:
-
-- no experiment-specific logic
-- framework-compliant (PyTorch / TensorFlow)
-- document mathematical formulation
-- clearly define input/output shapes
-
-Requirements:
-
-- differentiability
-- correct gradient propagation
-- compatibility with training pipeline
-- support for serialization
+No model or training-loop logic here.
 
 ---
 
-# 5. src/models/
+## 4. `morpho_net/layers/`
 
-Purpose: **network architectures**
+**Purpose:** morphological building blocks (Keras layers).
 
-This module defines how layers are composed into models.
+- **`dilation.py`** — `MorphologicalDilation` (learnable flat structuring elements on patches).
+- **`sup_erosions.py`** — supremum-of-erosions blocks (single- and two-input variants).
+- **`erosion.py`** — related helpers as needed.
 
-Typical architectures:
-
-- single-layer SupErosion
-- multi-layer networks
-- receptive-field models
-
-Structure:
-
-- one file per architecture
-
-Practices:
-
-- keep architectures simple and readable
-- no training logic inside models
-- expose configurable parameters (kernel size, depth, etc.)
-
-Requirements:
-
-- consistent input/output shapes
-- compatibility with training module
-- easy model instantiation from config
+Layers accept optional **Keras initializers** (from `initialization`) for weights; keep math and shapes documented in code.
 
 ---
 
-# 6. src/training/
+## 5. `morpho_net/models/`
 
-Purpose: **training logic (lightweight and flexible)**
+**Purpose:** full architectures composed from layers.
 
-This module manages model training and evaluation.
+- One module per architecture (e.g. single-layer SupErosions, two-layer, receptive-field variant).
+- **`registry.py`** — maps config `model.architecture` string → `build_from_config(model_cfg, init_cfg)`.
 
-Contents:
-
-- `trainer.py` → training loop
-- `losses.py` → loss functions
-- `metrics.py` → evaluation metrics
-
-Responsibilities:
-
-- training loop execution
-- optimizer and loss setup
-- metric computation
-- checkpoint saving
-- logging
-
-Practices:
-
-- independent from specific models
-- configurable via config file
-- reusable across experiments
-
-Requirements:
-
-- reproducible training
-- consistent logging
-- proper checkpointing
+Models stay free of training logic; parameters come from YAML.
 
 ---
 
-# 7. src/init/ (optional)
+## 6. `morpho_net/initialization/`
 
-Purpose: **weight initialization strategies**
+**Purpose:** **config-driven weight initialization** (extensible registry).
 
-Morphological networks are sensitive to initialization, so this module provides reusable strategies.
+- **`registry.py`** — `build_kernel_initializer(merged_cfg)` keyed by `method` or legacy `strategy` (`uniform`, `random_e_patches`, `minimal_e_patches`, …).
+- **`base.py`** — shared `MorphoInitializer` pattern.
+- Concrete initializers in dedicated modules; register new names with `register_initializer` or by extending `INITIALIZER_REGISTRY`.
 
-Typical methods:
+Per-block options for multi-branch models are merged in **`morpho_net.utils.merge.merge_init_block`** (`block1` / `block2` / `block3` overrides on top of global `initialization`).
 
-- random initialization
-- patch-based initialization
-
-Practices:
-
-- independent of training logic
-- reusable across models
-
-Requirements:
-
-- compatibility with layer shapes
-- numerical stability
+Initializers are **`@keras.saving.register_keras_serializable`** where needed for layer `get_config` / deserialization.
 
 ---
 
-# 8. src/analysis/
+## 7. `morpho_net/training/`
 
-Purpose: **post-training analysis and model comparison**
+**Purpose:** compile, fit, callbacks, and **pluggable training procedures**.
 
-This module contains tools to analyze trained models and experiment results.
+| Piece | Role |
+|--------|------|
+| **`fit.py`** | `compile_model`, `train_model` (Keras `fit`, checkpoint + early-stop callbacks). |
+| **`callbacks.py`** | Shared callback factory (checkpoint path, loss threshold stop). |
+| **`train.py`** | `run_training` — dispatches on config. |
+| **`registry.py`** | Maps `training.update_method` (or `training.method`) → `TrainingProcedure` subclass. |
+| **`procedures/`** | One module per procedure: e.g. `StandardFitProcedure`, `AlphaSchedulerProcedure`; stubs for future custom loops (`pareto_update`, `dense_update`, `soft_sup_erosions`). |
 
-Current focus:
-
-- Pareto frontier computation for:
-  - complexity vs performance trade-offs
-  - model simplification for inference
-  - interpretability and comparison
-
-Structure:
-
-- `pareto.py`
-
-Practices:
-
-- operates only on saved experiment results
-- not part of training pipeline
-- lightweight and extensible
-
-Requirements:
-
-- correct multi-objective comparison
-- numerical robustness
+Add a new training mode by subclassing **`procedures/base.TrainingProcedure`** and registering it with **`register_training_procedure`**.
 
 ---
 
-# 9. src/utils/
+## 8. `morpho_net/analysis/`
 
-Purpose: **generic utilities**
+**Purpose:** post-training understanding (not required during `fit`).
 
-Reusable helper functions used across the project.
-
-Typical contents:
-
-- `config.py` → config loading
-- `logging.py` → logging utilities
-- `plotting.py` → visualization (training curves, Pareto plots)
-
-Practices:
-
-- no domain-specific logic
-- reusable across modules
+- **`pareto.py`** — Pareto-efficient structuring elements.
+- **`experiment_plots.py`**, **`kernels.py`**, **`curves.py`** — plots and diagnostics tied to experiment outputs.
 
 ---
 
-# 10. experiments/
+## 9. `morpho_net/utils/`
 
-Purpose: **experiment tracking and reproducibility**
+**Purpose:** cross-cutting helpers.
 
-This folder stores outputs of all experiments.
-
-Structure:
-
-```bash
-experiments/
-└── exp_xxx/
-    ├── config.yaml
-    ├── metrics.json
-    ├── model.pth
-    └── logs/
-```
-
-Contents:
-
-- frozen configuration used
-- trained model
-- evaluation metrics
-- logs
-
-Practices:
-
-- one folder per run
-- configs are copied automatically
-- results are never overwritten
-
-Requirements:
-
-- full reproducibility
-- easy comparison across experiments
+- **`config.py`** — YAML load + `extends` + `deep_merge`.
+- **`merge.py`** — `deep_merge`, `merge_init_block` for nested dicts / initialization blocks.
+- **`experiment.py`** — experiment directory naming / sequencing.
 
 ---
 
-# 11. logs/ and checkpoints/
+## 10. `experiments/` (output root)
 
-Purpose: **runtime outputs**
+**Purpose:** artifacts per run (under `morpho-net/` or path from config `output.results_dir`).
 
-- `logs/` → TensorBoard or console logs
-- `checkpoints/` → optional shared checkpoints
+Typical contents per run:
 
-These are auxiliary and not required for reproducibility (handled by `experiments/`).
+- `config.yaml` — frozen resolved config
+- `metrics.json`
+- `Checkpoint/` — best weights (e.g. `checkpoint.weights.h5`)
+- plots from analysis pipeline
 
----
-
-# General Workflow
-
-1. Edit `config/config.yaml`
-2. Run training via script
-3. Automatically create experiment folder
-4. Save config, model, and metrics
-5. Use `analysis/` for comparison (e.g., Pareto frontier)
+One subdirectory per experiment name + run index; configs are not overwritten across repeats.
 
 ---
 
-# General Code Practices
+## Workflow
 
-### Modularity
-
-Each module has a single responsibility.
-
-### Reproducibility
-
-Every experiment is reproducible from its saved config.
-
-### Simplicity
-
-Avoid unnecessary abstraction; prioritize iteration speed.
-
-### Documentation
-
-Each component should describe:
-
-- inputs
-- outputs
-- tensor shapes
-- mathematical behavior (for layers)
-
-### Logging
-
-Track:
-
-- losses
-- metrics
-- configuration parameters
+1. Add or edit YAML under **`morpho-net/config/`** (optionally `extends: base.yaml`).
+2. Run **`uv run train --config <file>`** from the `morpho-net` directory.
+3. Inspect **`experiments/<name>_###/`** for config snapshot, metrics, checkpoints, plots.
+4. Use **`uv run evaluate <experiment_dir>`** for fresh metrics on saved weights.
 
 ---
 
-# Key Design Principle (important)
+## Design principle
 
-> Training, modeling, and analysis are clearly separated:
->
-> - **layers/models** → define the system
-> - **training** → optimize it
-> - **analysis** → understand and compare it
+> **Layers / models** define the forward map.  
+> **Initialization** sets starting weights from config.  
+> **Training** (procedure + `fit`) optimizes them.  
+> **Analysis** interprets and compares runs.
 
+Keep those boundaries when adding features.
