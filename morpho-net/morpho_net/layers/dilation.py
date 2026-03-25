@@ -6,6 +6,8 @@ Implemented via patch extraction: for each patch P, output = max(P + w) over pat
 
 from __future__ import annotations
 
+from typing import Any
+
 import keras
 from keras import layers
 
@@ -26,6 +28,7 @@ class MorphologicalDilation(layers.Layer):
         minval: float = -0.45,
         maxval: float = -0.15,
         seed: int | None = None,
+        kernel_initializer: keras.initializers.Initializer | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -36,17 +39,22 @@ class MorphologicalDilation(layers.Layer):
         self.minval = minval
         self.maxval = maxval
         self.seed = seed
+        self.kernel_initializer = kernel_initializer
 
     def build(self, input_shape: tuple) -> None:
         k_h, k_w = self.kernel_size
         patch_size = k_h * k_w
-        self.w = self.add_weight(
-            shape=(1, 1, 1, patch_size, self.filters),
-            initializer=keras.initializers.RandomUniform(
+        if self.kernel_initializer is not None:
+            initializer: keras.initializers.Initializer = self.kernel_initializer
+        else:
+            initializer = keras.initializers.RandomUniform(
                 minval=self.minval,
                 maxval=self.maxval,
                 seed=self.seed,
-            ),
+            )
+        self.w = self.add_weight(
+            shape=(1, 1, 1, patch_size, self.filters),
+            initializer=initializer,
             trainable=True,
             name="dilation_weights",
         )
@@ -73,5 +81,18 @@ class MorphologicalDilation(layers.Layer):
             "minval": self.minval,
             "maxval": self.maxval,
             "seed": self.seed,
+            "kernel_initializer": keras.saving.serialize_keras_object(self.kernel_initializer)
+            if self.kernel_initializer is not None
+            else None,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> MorphologicalDilation:
+        import morpho_net.initialization  # noqa: F401 — register MorphoNet initializers
+
+        config = dict(config)
+        raw = config.pop("kernel_initializer", None)
+        if raw is not None:
+            config["kernel_initializer"] = keras.saving.deserialize_keras_object(raw)
+        return cls(**config)

@@ -5,6 +5,8 @@ SupErosions: sup over multiple erosions with different structuring elements.
 
 from __future__ import annotations
 
+from typing import Any
+
 import keras
 from keras import layers
 from keras import ops
@@ -28,6 +30,7 @@ class SupErosionsBlock(layers.Layer):
         maxval: float = -0.15,
         padding: str = "VALID",
         seed: int | None = None,
+        kernel_initializer: keras.initializers.Initializer | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -37,6 +40,7 @@ class SupErosionsBlock(layers.Layer):
         self.maxval = maxval
         self.padding = padding
         self.seed = seed
+        self.kernel_initializer = kernel_initializer
         self.erosion = MorphologicalDilation(  # erosion = -dilation(-x)
             filters=n_erosions,
             kernel_size=kernel_size,
@@ -45,6 +49,7 @@ class SupErosionsBlock(layers.Layer):
             minval=minval,
             maxval=maxval,
             seed=seed,
+            kernel_initializer=kernel_initializer,
         )
 
     def build(self, input_shape: tuple) -> None:
@@ -65,8 +70,21 @@ class SupErosionsBlock(layers.Layer):
             "maxval": self.maxval,
             "padding": self.padding,
             "seed": self.seed,
+            "kernel_initializer": keras.saving.serialize_keras_object(self.kernel_initializer)
+            if self.kernel_initializer is not None
+            else None,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> SupErosionsBlock:
+        import morpho_net.initialization  # noqa: F401
+
+        config = dict(config)
+        raw = config.pop("kernel_initializer", None)
+        if raw is not None:
+            config["kernel_initializer"] = keras.saving.deserialize_keras_object(raw)
+        return cls(**config)
 
 
 class SupErosionsBlock2Inputs(layers.Layer):
@@ -83,6 +101,7 @@ class SupErosionsBlock2Inputs(layers.Layer):
         minval: float = -0.45,
         maxval: float = -0.15,
         seed: int | None = None,
+        weight_initializer: keras.initializers.Initializer | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -90,26 +109,27 @@ class SupErosionsBlock2Inputs(layers.Layer):
         self.minval = minval
         self.maxval = maxval
         self.seed = seed
+        self.weight_initializer = weight_initializer
 
     def build(self, input_shape) -> None:
         # input_shape can be list of two shapes for two inputs
-        self.w1 = self.add_weight(
-            shape=(self.n_erosions,),
-            initializer=keras.initializers.RandomUniform(
+        if self.weight_initializer is not None:
+            initializer: keras.initializers.Initializer = self.weight_initializer
+        else:
+            initializer = keras.initializers.RandomUniform(
                 minval=self.minval,
                 maxval=self.maxval,
                 seed=self.seed,
-            ),
+            )
+        self.w1 = self.add_weight(
+            shape=(self.n_erosions,),
+            initializer=initializer,
             trainable=True,
             name="w1",
         )
         self.w2 = self.add_weight(
             shape=(self.n_erosions,),
-            initializer=keras.initializers.RandomUniform(
-                minval=self.minval,
-                maxval=self.maxval,
-                seed=self.seed,
-            ),
+            initializer=initializer,
             trainable=True,
             name="w2",
         )
@@ -134,5 +154,18 @@ class SupErosionsBlock2Inputs(layers.Layer):
             "minval": self.minval,
             "maxval": self.maxval,
             "seed": self.seed,
+            "weight_initializer": keras.saving.serialize_keras_object(self.weight_initializer)
+            if self.weight_initializer is not None
+            else None,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> SupErosionsBlock2Inputs:
+        import morpho_net.initialization  # noqa: F401
+
+        config = dict(config)
+        raw = config.pop("weight_initializer", None)
+        if raw is not None:
+            config["weight_initializer"] = keras.saving.deserialize_keras_object(raw)
+        return cls(**config)
