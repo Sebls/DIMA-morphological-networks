@@ -7,7 +7,7 @@ from pathlib import Path
 import keras
 import tensorflow as tf
 
-
+#Early stopping if the validation loss is smaller than the threshold (we admit that the training is succesfull in this case)
 def create_callbacks(
     checkpoint_dir: str | Path,
     loss_threshold: float = 1.0 / (255**2),
@@ -27,6 +27,11 @@ def create_callbacks(
         save_freq="epoch",
         save_best_only=True,
     )
+
+    # Implement callback function to stop training
+    # when val loss reaches e.g. LOSS_THRESHOLD = 1.5e-05
+    # From Supratim Haldar
+    # https://towardsdatascience.com/neural-network-with-tensorflow-how-to-stop-training-using-callback-5c8d575c18a9
 
     class EarlyStopCallback(tf.keras.callbacks.Callback):
         def on_epoch_end(self, epoch, logs=None):
