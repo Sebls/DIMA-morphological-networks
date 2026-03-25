@@ -1,4 +1,4 @@
-"""Training procedures."""
+"""High-level training entry: dispatch on config ``training.update_method``."""
 
 from __future__ import annotations
 
@@ -8,27 +8,11 @@ from typing import Any
 import keras
 import numpy as np
 
-from morpho_net.training.callbacks import create_callbacks
+from morpho_net.training.fit import compile_model, train_model
+from morpho_net.training.registry import get_training_procedure_class
 
 
-def compile_model(
-    model: keras.Model,
-    learning_rate: float = 0.01,
-    loss: str = "mse",
-    optimizer: str = "adam",
-) -> None:
-    """Compile model for training."""
-    opt = keras.optimizers.Adam(learning_rate=learning_rate) if optimizer == "adam" else None
-    if opt is None:
-        opt = keras.optimizers.get(optimizer)
-    model.compile(
-        loss=keras.losses.MeanSquaredError(),
-        optimizer=opt,
-        metrics=["mse"],
-    )
-
-
-def train_model(
+def run_training(
     model: keras.Model,
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -37,41 +21,11 @@ def train_model(
     config: dict[str, Any],
     output_dir: str | Path | None = None,
 ) -> keras.callbacks.History:
-    """Train model with given data and config."""
+    """Run the training procedure selected by ``config['training']['update_method']``."""
     train_cfg = config.get("training", {})
-    callbacks_cfg = config.get("callbacks", {})
-    output_cfg = config.get("output", {})
+    name = train_cfg.get("update_method") or train_cfg.get("method") or "standard_fit"
+    procedure_cls = get_training_procedure_class(name)
+    return procedure_cls().run(model, x_train, y_train, x_val, y_val, config, output_dir)
 
-    if output_dir is None:
-        output_dir = Path(output_cfg.get("checkpoint_dir", "Checkpoint"))
 
-    threshold = callbacks_cfg.get("loss_threshold", "auto")
-    if threshold == "auto":
-        loss_threshold = 1.0 / (255**2)
-    else:
-        loss_threshold = float(threshold)
-
-    callbacks = create_callbacks(
-        checkpoint_dir=output_dir,
-        loss_threshold=loss_threshold,
-        monitor=callbacks_cfg.get("checkpoint_monitor", "val_loss"),
-        mode=callbacks_cfg.get("checkpoint_mode", "min"),
-    )
-
-    # Ensure y has correct shape for model output (N, H, W, 1)
-    if y_train.ndim == 2:
-        y_train = np.expand_dims(y_train, axis=-1)
-    if y_val.ndim == 2:
-        y_val = np.expand_dims(y_val, axis=-1)
-
-    history = model.fit(
-        x_train,
-        y_train,
-        batch_size=train_cfg.get("batch_size", 10),
-        epochs=train_cfg.get("epochs", 2000),
-        verbose=1,
-        validation_data=(x_val, y_val),
-        callbacks=callbacks,
-    )
-
-    return history
+__all__ = ["compile_model", "train_model", "run_training"]
