@@ -45,9 +45,15 @@ def train_model(
     if output_dir is None:
         output_dir = Path(output_cfg.get("checkpoint_dir", "Checkpoint"))
 
+    threshold = callbacks_cfg.get("loss_threshold", "auto")
+    if threshold == "auto":
+        loss_threshold = 1.0 / (255**2)
+    else:
+        loss_threshold = float(threshold)
+
     callbacks = create_callbacks(
         checkpoint_dir=output_dir,
-        loss_threshold=callbacks_cfg.get("loss_threshold", 1.0 / (255**2)),
+        loss_threshold=loss_threshold,
         monitor=callbacks_cfg.get("checkpoint_monitor", "val_loss"),
         mode=callbacks_cfg.get("checkpoint_mode", "min"),
     )

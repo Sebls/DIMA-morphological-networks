@@ -16,7 +16,7 @@ training:
   optimizer: adam
 
 callbacks:
-  loss_threshold: 0.000015  # 1/255^2
+  loss_threshold: auto  # 1/255^2
   checkpoint_monitor: val_loss
   checkpoint_mode: min
 
