@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import keras
 from keras import layers, Model, Input
 
@@ -106,3 +108,28 @@ def _apply_receptive_field_masks(
         for idx in block2_inactive:
             w[0, 0, 0, idx, :] = inactive_value
         layer.set_weights([w])
+
+
+def build_from_config(model_cfg: dict[str, Any], init_cfg: dict[str, Any]) -> Model:
+    """Instantiate from ``model`` / ``initialization`` config dicts (YAML sections)."""
+    return build_two_layer_receptive_field(
+        n_erosions_block1=model_cfg.get("n_erosions_block1", 500),
+        n_erosions_block2=model_cfg.get("n_erosions_block2", 500),
+        n_erosions_block3=model_cfg.get("n_erosions_block3", 700),
+        kernel_size=tuple(model_cfg.get("kernel_size", [3, 3])),
+        block1_inactive_indices=model_cfg.get("block1_inactive_indices", [4, 5, 6, 7, 8]),
+        block2_inactive_indices=model_cfg.get("block2_inactive_indices", [0, 1, 2, 3]),
+        inactive_value=model_cfg.get("inactive_value", -10.0),
+        init_block1=(
+            init_cfg.get("block1", {}).get("minval", -0.35),
+            init_cfg.get("block1", {}).get("maxval", 0.35),
+        ),
+        init_block2=(
+            init_cfg.get("block2", {}).get("minval", -0.35),
+            init_cfg.get("block2", {}).get("maxval", 0.35),
+        ),
+        init_block3=(
+            init_cfg.get("block3", {}).get("minval", -0.35),
+            init_cfg.get("block3", {}).get("maxval", 0.35),
+        ),
+    )

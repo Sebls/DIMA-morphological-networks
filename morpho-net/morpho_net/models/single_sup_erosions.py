@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import keras
 from keras import layers, Model, Input
 
@@ -39,3 +41,13 @@ def build_single_sup_erosions(
     out = keras.ops.max(erosion_out, axis=-1, keepdims=True)
 
     return Model(x, out, name=name)
+
+
+def build_from_config(model_cfg: dict[str, Any], init_cfg: dict[str, Any]) -> Model:
+    """Instantiate from ``model`` / ``initialization`` config dicts (YAML sections)."""
+    return build_single_sup_erosions(
+        n_erosions=model_cfg.get("n_erosions", 200),
+        kernel_size=tuple(model_cfg.get("kernel_size", [3, 3])),
+        minval=init_cfg.get("minval", -0.45),
+        maxval=init_cfg.get("maxval", -0.15),
+    )

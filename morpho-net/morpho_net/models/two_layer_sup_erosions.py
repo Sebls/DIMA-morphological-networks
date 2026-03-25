@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import keras
 from keras import layers, Model, Input
 
@@ -67,3 +69,25 @@ def build_two_layer_sup_erosions(
     )([sup1, sup2])
 
     return Model(x, out, name=name)
+
+
+def build_from_config(model_cfg: dict[str, Any], init_cfg: dict[str, Any]) -> Model:
+    """Instantiate from ``model`` / ``initialization`` config dicts (YAML sections)."""
+    return build_two_layer_sup_erosions(
+        n_erosions_block1=model_cfg.get("n_erosions_block1", 50),
+        n_erosions_block2=model_cfg.get("n_erosions_block2", 50),
+        n_erosions_block3=model_cfg.get("n_erosions_block3", 100),
+        kernel_size=tuple(model_cfg.get("kernel_size", [3, 3])),
+        init_block1=(
+            init_cfg.get("block1", {}).get("minval", -0.45),
+            init_cfg.get("block1", {}).get("maxval", -0.15),
+        ),
+        init_block2=(
+            init_cfg.get("block2", {}).get("minval", -0.45),
+            init_cfg.get("block2", {}).get("maxval", -0.15),
+        ),
+        init_block3=(
+            init_cfg.get("block3", {}).get("minval", -0.45),
+            init_cfg.get("block3", {}).get("maxval", -0.15),
+        ),
+    )
