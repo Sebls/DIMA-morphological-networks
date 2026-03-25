@@ -7,6 +7,7 @@ from typing import Any
 import keras
 from keras import layers, Model, Input
 
+from morpho_net.initialization import build_kernel_initializer, merge_init_block
 from morpho_net.layers.dilation import MorphologicalDilation
 from morpho_net.layers.sup_erosions import SupErosionsBlock2Inputs
 
@@ -24,6 +25,9 @@ def build_two_layer_receptive_field(
     init_block2: tuple[float, float] = (-0.35, 0.35),
     init_block3: tuple[float, float] = (-0.35, 0.35),
     seed: int | None = None,
+    kernel_initializer_block1: keras.initializers.Initializer | None = None,
+    kernel_initializer_block2: keras.initializers.Initializer | None = None,
+    weight_initializer_block3: keras.initializers.Initializer | None = None,
     name: str = "two_layer_receptive_field",
 ) -> Model:
     """Build two-layer model with zone-specialized receptive fields.
@@ -47,6 +51,7 @@ def build_two_layer_receptive_field(
         minval=init_block1[0],
         maxval=init_block1[1],
         seed=seed,
+        kernel_initializer=kernel_initializer_block1,
         name="Erosions1",
     )
     out1 = -dil1(-x_pad)
@@ -61,6 +66,7 @@ def build_two_layer_receptive_field(
         minval=init_block2[0],
         maxval=init_block2[1],
         seed=seed,
+        kernel_initializer=kernel_initializer_block2,
         name="Erosions2",
     )
     out2 = -dil2(-x_pad)
@@ -71,6 +77,7 @@ def build_two_layer_receptive_field(
         minval=init_block3[0],
         maxval=init_block3[1],
         seed=seed,
+        weight_initializer=weight_initializer_block3,
         name="SupErosions_3",
     )([sup1, sup2])
 
@@ -112,6 +119,9 @@ def _apply_receptive_field_masks(
 
 def build_from_config(model_cfg: dict[str, Any], init_cfg: dict[str, Any]) -> Model:
     """Instantiate from ``model`` / ``initialization`` config dicts (YAML sections)."""
+    m1 = merge_init_block(init_cfg, "block1")
+    m2 = merge_init_block(init_cfg, "block2")
+    m3 = merge_init_block(init_cfg, "block3")
     return build_two_layer_receptive_field(
         n_erosions_block1=model_cfg.get("n_erosions_block1", 500),
         n_erosions_block2=model_cfg.get("n_erosions_block2", 500),
@@ -121,15 +131,19 @@ def build_from_config(model_cfg: dict[str, Any], init_cfg: dict[str, Any]) -> Mo
         block2_inactive_indices=model_cfg.get("block2_inactive_indices", [0, 1, 2, 3]),
         inactive_value=model_cfg.get("inactive_value", -10.0),
         init_block1=(
-            init_cfg.get("block1", {}).get("minval", -0.35),
-            init_cfg.get("block1", {}).get("maxval", 0.35),
+            float(m1.get("minval", -0.35)),
+            float(m1.get("maxval", 0.35)),
         ),
         init_block2=(
-            init_cfg.get("block2", {}).get("minval", -0.35),
-            init_cfg.get("block2", {}).get("maxval", 0.35),
+            float(m2.get("minval", -0.35)),
+            float(m2.get("maxval", 0.35)),
         ),
         init_block3=(
-            init_cfg.get("block3", {}).get("minval", -0.35),
-            init_cfg.get("block3", {}).get("maxval", 0.35),
+            float(m3.get("minval", -0.35)),
+            float(m3.get("maxval", 0.35)),
         ),
+        seed=init_cfg.get("seed"),
+        kernel_initializer_block1=build_kernel_initializer(m1),
+        kernel_initializer_block2=build_kernel_initializer(m2),
+        weight_initializer_block3=build_kernel_initializer(m3),
     )
