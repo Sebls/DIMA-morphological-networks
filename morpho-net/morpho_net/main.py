@@ -28,7 +28,7 @@ def main() -> None:
         "--seed",
         type=int,
         default=42,
-        help="Random seed",
+        help="Global NumPy/TensorFlow seed (model, training); dataset noise uses dataset.seed in config",
     )
     args = parser.parse_args()
 

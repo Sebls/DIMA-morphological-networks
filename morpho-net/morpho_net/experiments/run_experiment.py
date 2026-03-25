@@ -31,6 +31,11 @@ def run_experiment(
 ) -> dict[str, Any]:
     """Run experiment from config file.
 
+    ``seed`` sets the global NumPy and TensorFlow RNGs (model init, training).
+    Dataset Gaussian noise uses ``config["dataset"]["seed"]`` only, via a
+    dedicated :class:`numpy.random.Generator`, so it does not clobber this
+    global state.
+
     Returns dict with metrics, history, and paths.
     """
     config = load_config(config_path)

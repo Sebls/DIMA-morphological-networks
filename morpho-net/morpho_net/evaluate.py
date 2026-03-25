@@ -79,7 +79,7 @@ def main() -> None:
         "--seed",
         type=int,
         default=42,
-        help="Random seed for data",
+        help="Seed for dataset noise only (local RNG; pass dataset.seed from config for parity with training)",
     )
     args = parser.parse_args()
 

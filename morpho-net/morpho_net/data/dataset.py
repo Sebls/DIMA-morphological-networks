@@ -30,13 +30,13 @@ def load_fashion_mnist_noisy(
         size: Number of samples per split.
         use_noise: Whether to add Gaussian noise.
         sigma: Standard deviation of noise.
-        seed: Random seed for reproducibility.
+        seed: Seed for noise only (local ``numpy.random.Generator``). Does not
+            alter the global NumPy RNG, so experiment-level seeds stay intact.
 
     Returns:
         (train_split, val_split, test_split) with normalized images [0, 1].
     """
-    if seed is not None:
-        np.random.seed(seed)
+    rng = np.random.default_rng(seed)
 
     (x_train, y_train), (x_test, y_test) = fashion_mnist.load_data()
 
@@ -46,7 +46,7 @@ def load_fashion_mnist_noisy(
 
     def add_noise(x: np.ndarray) -> np.ndarray:
         if use_noise:
-            noisy = x + np.random.normal(0, sigma, x.shape)
+            noisy = x + rng.normal(0, sigma, x.shape)
         else:
             noisy = x.copy()
         return np.clip(noisy, 0, 255).astype(np.float32)
