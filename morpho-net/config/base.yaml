@@ -9,11 +9,16 @@ dataset:
   seed: 42  # noise only; does not reset global NumPy (see run_experiment --seed)
 
 training:
+  # standard_fit | gradient_descent | alpha_scheduler | pareto_update | dense_update | soft_sup_erosions
+  update_method: standard_fit
   batch_size: 10
   epochs: 2000
   learning_rate: 0.01
   loss: mse
   optimizer: adam
+  # Optional when update_method: alpha_scheduler — LR *= decay_rate each epoch
+  # alpha_scheduler:
+  #   decay_rate: 0.99
 
 callbacks:
   loss_threshold: auto  # 1/255^2
