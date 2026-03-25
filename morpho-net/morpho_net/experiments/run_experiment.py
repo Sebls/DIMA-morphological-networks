@@ -13,6 +13,7 @@ import tensorflow as tf
 from tensorflow.keras.losses import MeanSquaredError
 
 from morpho_net.utils.config import load_config
+from morpho_net.utils.experiment import next_experiment_dir
 from morpho_net.data import load_fashion_mnist_noisy, create_ground_truth_model, generate_ground_truth
 from morpho_net.models import (
     build_single_sup_erosions,
@@ -21,27 +22,6 @@ from morpho_net.models import (
 )
 from morpho_net.training import compile_model, train_model
 from morpho_net.analysis.experiment_plots import generate_experiment_plots
-
-
-def _next_experiment_dir(results_base: Path, exp_name: str) -> Path:
-    """Return next available experiment directory with sequential index (e.g. exp_name_001)."""
-    results_base = Path(results_base)
-    results_base.mkdir(parents=True, exist_ok=True)
-
-    max_idx = 0
-    for p in results_base.iterdir():
-        if not p.is_dir():
-            continue
-        name = p.name
-        if name == exp_name:
-            max_idx = max(max_idx, 1)
-        elif name.startswith(f"{exp_name}_"):
-            suffix = name[len(exp_name) + 1 :]
-            if suffix.isdigit():
-                max_idx = max(max_idx, int(suffix))
-
-    next_idx = max_idx + 1
-    return results_base / f"{exp_name}_{next_idx:03d}"
 
 
 def run_experiment(
@@ -63,7 +43,7 @@ def run_experiment(
     exp_name = config.get("experiment", {}).get("name", "experiment")
     results_base = Path(config.get("output", {}).get("results_dir", "experiments"))
     if output_dir is None:
-        output_dir = _next_experiment_dir(results_base, exp_name)
+        output_dir = next_experiment_dir(results_base, exp_name)
     else:
         output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
