@@ -16,7 +16,7 @@ from morpho_net.utils.config import load_config
 from morpho_net.utils.experiment import next_experiment_dir
 from morpho_net.data import load_fashion_mnist_noisy, create_ground_truth_model, generate_ground_truth
 from morpho_net.models import build_model
-from morpho_net.training import compile_model, train_model
+from morpho_net.training import run_training
 from morpho_net.analysis.experiment_plots import generate_experiment_plots
 
 
@@ -80,20 +80,12 @@ def run_experiment(
     init_cfg = config.get("initialization", {})
     model = build_model(arch, model_cfg, init_cfg)
 
-    # Compile and train
-    train_cfg = config.get("training", {})
-    compile_model(
-        model,
-        learning_rate=train_cfg.get("learning_rate", 0.01),
-        loss=train_cfg.get("loss", "mse"),
-        optimizer=train_cfg.get("optimizer", "adam"),
-    )
-
     # Merge output config for checkpoint path
     merged_config = {**config, "output": {**config.get("output", {}), "checkpoint_dir": str(checkpoint_dir)}}
 
+    # Train model
     start = time.perf_counter()
-    history = train_model(
+    history = run_training(
         model,
         train_split.images,
         y_train,
