@@ -1,0 +1,25 @@
+# Base configuration shared by all experiments
+# Override in experiment-specific configs
+
+dataset:
+  name: fashion_mnist
+  size: 100
+  use_noise: true
+  sigma: 40
+  seed: 42  # noise only; does not reset global NumPy (see run_experiment --seed)
+
+training:
+  batch_size: 10
+  epochs: 2000
+  learning_rate: 0.01
+  loss: mse
+  optimizer: adam
+
+callbacks:
+  loss_threshold: 0.000015  # 1/255^2
+  checkpoint_monitor: val_loss
+  checkpoint_mode: min
+
+output:
+  checkpoint_dir: Checkpoint
+  results_dir: experiments
