@@ -16,6 +16,10 @@ training:
   learning_rate: 0.01
   loss: mse
   optimizer: adam
+  # Save all layer weights every k completed epochs (under Checkpoint/weight_snapshots/); null disables
+  weight_snapshot_every_k_epochs: 5
+  # Bins for weight-distribution snapshot plots (see plot_data/)
+  weight_snapshot_histogram_bins: 40
   # Optional when update_method: alpha_scheduler — LR *= decay_rate each epoch
   # alpha_scheduler:
   #   decay_rate: 0.99
