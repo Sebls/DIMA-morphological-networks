@@ -1,0 +1,32 @@
+# Experiment 3: 4-pixel Average Filter (Single Layer)
+# Learn cross-shaped average filter
+
+extends: base.yaml
+
+experiment:
+  name: exp3_4pixel_single
+  description: "4-pixel average filter with single SupErosions layer"
+
+ground_truth:
+  kernel:
+    - [0,   0.25, 0]
+    - [0.25, 0,   0.25]
+    - [0,   0.25, 0]
+
+model:
+  architecture: single_sup_erosions
+  n_erosions: 1200
+  kernel_size: [3, 3]
+
+initialization:
+  strategy: uniform
+  minval: -0.35
+  maxval: 0.35
+
+training:
+  batch_size: 50
+
+notes:
+  difficulty: high
+  behavior: "unstable / frequent failure"
+  recommendation: "analyze convergence and failure cases"

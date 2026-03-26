@@ -88,7 +88,13 @@ tmp/
 
 # Experiment outputs
 results/
-morpho-net/experiments/
+experiments/
 Checkpoint/
 *.h5
 .venv/
+
+# Temporal Ignores
+docs/experiments
+bibliography/
+scripts/
+slides/
