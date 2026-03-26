@@ -129,8 +129,9 @@ def run_experiment(
     with open(output_dir / "metrics.json", "w") as f:
         json.dump(results, f, indent=2)
 
-    # Generate plots: loss curves, structuring elements (all + Pareto minimal)
+    # Generate plots: loss curves, structuring elements (all + Pareto minimal), weight snapshots
     kernel_shape = tuple(model_cfg.get("kernel_size", [3, 3]))
+    train_cfg = config.get("training", {})
     generate_experiment_plots(
         model,
         history,
@@ -139,6 +140,8 @@ def run_experiment(
         n_show=100,
         test_mse=test_mse,
         elapsed_seconds=elapsed,
+        checkpoint_dir=checkpoint_dir,
+        weight_snapshot_histogram_bins=int(train_cfg.get("weight_snapshot_histogram_bins", 40)),
     )
 
     return results
