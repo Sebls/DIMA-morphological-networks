@@ -7,6 +7,7 @@ from pathlib import Path
 from morpho_net.analysis.curves import save_training_history, plot_training_curves
 from morpho_net.analysis.kernels import plot_structuring_elements, plot_pareto_elements
 from morpho_net.analysis.pareto import extract_pareto_filters
+from morpho_net.analysis.weight_evolution import generate_weight_evolution_artifacts
 
 
 def _get_erosion_layers(model):
@@ -31,6 +32,8 @@ def generate_experiment_plots(
     n_show: int = 100,
     test_mse: float | None = None,
     elapsed_seconds: float | None = None,
+    checkpoint_dir: str | Path | None = None,
+    weight_snapshot_histogram_bins: int = 40,
 ) -> None:
     """Generate all plots for an experiment: loss curves, structuring elements, Pareto minimals.
 
@@ -40,6 +43,10 @@ def generate_experiment_plots(
         output_dir: Directory to save plots and loss_history.txt.
         kernel_shape: (H, W) of each kernel.
         n_show: Max number of structuring elements to show in "all" plot (~100).
+        test_mse: Test MSE if available.
+        elapsed_seconds: Wall time for training if available.
+        checkpoint_dir: Checkpoint dir (contains ``weight_snapshots/`` when snapshots enabled).
+        weight_snapshot_histogram_bins: Bins for weight-distribution evolution plot data.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -73,9 +80,6 @@ def generate_experiment_plots(
 
     # 3. Structuring elements from each MorphologicalDilation layer
     erosion_layers = _get_erosion_layers(model)
-    if not erosion_layers:
-        return
-
     for layer_name, weights in erosion_layers:
         safe_name = layer_name.replace("/", "_")
         n_total = weights.shape[-1]
@@ -106,3 +110,14 @@ def generate_experiment_plots(
                 )
         except Exception:
             pass  # Skip if Pareto extraction fails
+
+    # 4. Weight snapshots: Pareto evolution + histogram row (uses Checkpoint/weight_snapshots/)
+    if checkpoint_dir is not None:
+        plot_data_dir = output_dir / "plot_data"
+        generate_weight_evolution_artifacts(
+            Path(checkpoint_dir) / "weight_snapshots",
+            plots_dir,
+            plot_data_dir,
+            kernel_shape=kernel_shape,
+            histogram_bins=weight_snapshot_histogram_bins,
+        )
