@@ -87,14 +87,12 @@ tmp/
 /gradle
 
 # Experiment outputs
-results/
-experiments/
-Checkpoint/
+/experiments/
 *.h5
 .venv/
 
 # Temporal Ignores
-docs/experiments
-bibliography/
-scripts/
-slides/
+/docs/experiments
+/bibliography/
+/scripts/
+/slides/
