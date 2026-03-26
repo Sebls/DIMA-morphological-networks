@@ -8,7 +8,7 @@ from typing import Any
 import keras
 import numpy as np
 
-from morpho_net.training.callbacks import create_callbacks
+from morpho_net.training.callbacks import create_callbacks, create_weight_snapshot_callback
 
 
 def compile_model(
@@ -60,6 +60,11 @@ def train_model(
     )
     if extra_callbacks:
         callbacks = list(callbacks) + list(extra_callbacks)
+
+    snap_k = train_cfg.get("weight_snapshot_every_k_epochs")
+    snap_cb = create_weight_snapshot_callback(output_dir, snap_k)
+    if snap_cb is not None:
+        callbacks = list(callbacks) + [snap_cb]
 
     # Ensure y has correct shape for model output (N, H, W, 1)
     if y_train.ndim == 2:
