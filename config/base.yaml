@@ -20,6 +20,9 @@ training:
   weight_snapshot_every_k_epochs: 5
   # Bins for weight-distribution snapshot plots (see plot_data/)
   weight_snapshot_histogram_bins: 40
+  # Plot subsampling: max time *columns* in layer×time histogram grid (rows = SupErosion layers)
+  # null = use every saved snapshot as a column (can be slow)
+  weight_snapshot_plot_max_histograms: 10
   # Optional when update_method: alpha_scheduler — LR *= decay_rate each epoch
   # alpha_scheduler:
   #   decay_rate: 0.99
