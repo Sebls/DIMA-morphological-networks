@@ -29,7 +29,11 @@ def generate_experiment_plots(
     history,
     output_dir: str | Path,
     kernel_shape: tuple[int, int] = (3, 3),
-    n_show: int = 100,
+    n_show: int | None = 100,
+    structuring_filters_per_page: int = 25,
+    structuring_cols: int = 5,
+    pareto_filters_per_page: int = 25,
+    pareto_cols: int = 5,
     test_mse: float | None = None,
     elapsed_seconds: float | None = None,
     checkpoint_dir: str | Path | None = None,
@@ -43,7 +47,11 @@ def generate_experiment_plots(
         history: Keras History object (history.history).
         output_dir: Directory to save plots and loss_history.txt.
         kernel_shape: (H, W) of each kernel.
-        n_show: Max number of structuring elements to show in "all" plot (~100).
+        n_show: Max number of structuring elements to plot; ``None`` = all filters.
+        structuring_filters_per_page: Kernels per PNG when paginating (e.g. 25 → 5×5 grids).
+        structuring_cols: Columns per page for structuring-element grids.
+        pareto_filters_per_page: Same pagination for Pareto-minimal plots.
+        pareto_cols: Columns per page for Pareto grids.
         test_mse: Test MSE if available.
         elapsed_seconds: Wall time for training if available.
         checkpoint_dir: Checkpoint dir (contains ``weight_snapshots/`` when snapshots enabled).
@@ -90,13 +98,20 @@ def generate_experiment_plots(
         n_total = weights.shape[-1]
 
         # 3a. All elements (limited to n_show)
-        n_displayed = min(n_show, n_total)
-        print(f"  … structuring_elements all: {layer_name!r} ({n_displayed} of {n_total})", flush=True)
+        cap = n_total if n_show is None else min(n_show, n_total)
+        n_displayed = cap
+        n_pages = (n_displayed + structuring_filters_per_page - 1) // structuring_filters_per_page
+        print(
+            f"  … structuring_elements all: {layer_name!r} ({n_displayed} of {n_total}, "
+            f"{n_pages} page(s) × up to {structuring_filters_per_page} filters)",
+            flush=True,
+        )
         plot_structuring_elements(
             weights,
             kernel_shape=kernel_shape,
             n_show=n_displayed,
-            cols=10,
+            cols=structuring_cols,
+            filters_per_page=structuring_filters_per_page,
             title=f"Structuring Elements ({layer_name}) — {n_displayed} of {n_total}",
             save_path=plots_dir / f"structuring_elements_{safe_name}_all.png",
             show=False,
@@ -108,9 +123,16 @@ def generate_experiment_plots(
             n_pareto = pareto_filters.shape[1]
             if pareto_filters.size > 0:
                 print(f"  … structuring_elements pareto: {layer_name!r} (n_pareto={n_pareto})", flush=True)
+                n_p_pages = (n_pareto + pareto_filters_per_page - 1) // pareto_filters_per_page
+                print(
+                    f"    … pareto pages: {n_p_pages} × up to {pareto_filters_per_page} filters",
+                    flush=True,
+                )
                 plot_pareto_elements(
                     pareto_filters,
                     kernel_shape=kernel_shape,
+                    cols=pareto_cols,
+                    filters_per_page=pareto_filters_per_page,
                     title=f"Minimal Structuring Elements - Pareto ({layer_name}) — {n_pareto} elements",
                     save_path=plots_dir / f"structuring_elements_{safe_name}_pareto.png",
                     show=False,
