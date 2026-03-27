@@ -139,7 +139,6 @@ def run_experiment(
         history,
         output_dir,
         kernel_shape=kernel_shape,
-        n_show=100,
         test_mse=test_mse,
         elapsed_seconds=elapsed,
         checkpoint_dir=checkpoint_dir,

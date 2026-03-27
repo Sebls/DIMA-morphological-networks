@@ -29,11 +29,11 @@ def generate_experiment_plots(
     history,
     output_dir: str | Path,
     kernel_shape: tuple[int, int] = (3, 3),
-    n_show: int | None = 100,
+    n_show: int | None = None,
     structuring_filters_per_page: int = 25,
     structuring_cols: int = 5,
-    pareto_filters_per_page: int = 25,
-    pareto_cols: int = 5,
+    pareto_filters_per_page: int = 50,
+    pareto_cols: int = 10,
     test_mse: float | None = None,
     elapsed_seconds: float | None = None,
     checkpoint_dir: str | Path | None = None,
@@ -47,7 +47,7 @@ def generate_experiment_plots(
         history: Keras History object (history.history).
         output_dir: Directory to save plots and loss_history.txt.
         kernel_shape: (H, W) of each kernel.
-        n_show: Max number of structuring elements to plot; ``None`` = all filters.
+        n_show: Optional cap on structuring elements; ``None`` (default) = plot every filter.
         structuring_filters_per_page: Kernels per PNG when paginating (e.g. 25 → 5×5 grids).
         structuring_cols: Columns per page for structuring-element grids.
         pareto_filters_per_page: Same pagination for Pareto-minimal plots.
@@ -97,7 +97,7 @@ def generate_experiment_plots(
         safe_name = layer_name.replace("/", "_")
         n_total = weights.shape[-1]
 
-        # 3a. All elements (limited to n_show)
+        # 3a. All elements (optional cap via n_show)
         cap = n_total if n_show is None else min(n_show, n_total)
         n_displayed = cap
         n_pages = (n_displayed + structuring_filters_per_page - 1) // structuring_filters_per_page
