@@ -18,6 +18,7 @@ from morpho_net.data import load_fashion_mnist_noisy, create_ground_truth_model,
 from morpho_net.models import build_model
 from morpho_net.training import run_training
 from morpho_net.analysis.experiment_plots import generate_experiment_plots
+from morpho_net.analysis.weight_evolution import parse_weight_snapshot_plot_settings
 
 
 def run_experiment(
@@ -132,6 +133,7 @@ def run_experiment(
     # Generate plots: loss curves, structuring elements (all + Pareto minimal), weight snapshots
     kernel_shape = tuple(model_cfg.get("kernel_size", [3, 3]))
     train_cfg = config.get("training", {})
+    wplot = parse_weight_snapshot_plot_settings(train_cfg)
     generate_experiment_plots(
         model,
         history,
@@ -141,7 +143,8 @@ def run_experiment(
         test_mse=test_mse,
         elapsed_seconds=elapsed,
         checkpoint_dir=checkpoint_dir,
-        weight_snapshot_histogram_bins=int(train_cfg.get("weight_snapshot_histogram_bins", 40)),
+        weight_snapshot_histogram_bins=wplot["histogram_bins"],
+        weight_snapshot_plot_max_histograms=wplot["max_histogram_snapshots"],
     )
 
     return results

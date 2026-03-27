@@ -34,6 +34,7 @@ def generate_experiment_plots(
     elapsed_seconds: float | None = None,
     checkpoint_dir: str | Path | None = None,
     weight_snapshot_histogram_bins: int = 40,
+    weight_snapshot_plot_max_histograms: int | None = 10,
 ) -> None:
     """Generate all plots for an experiment: loss curves, structuring elements, Pareto minimals.
 
@@ -47,6 +48,8 @@ def generate_experiment_plots(
         elapsed_seconds: Wall time for training if available.
         checkpoint_dir: Checkpoint dir (contains ``weight_snapshots/`` when snapshots enabled).
         weight_snapshot_histogram_bins: Bins for weight-distribution evolution plot data.
+        weight_snapshot_plot_max_histograms: Max **time columns** in the layer×time histogram grid;
+            ``None`` = all saved snapshots (can be slow).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -54,6 +57,7 @@ def generate_experiment_plots(
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Save loss history to .txt
+    print("[plots] step: loss history + training/validation curves (linear + log)", flush=True)
     hist_data = history.history if hasattr(history, "history") else history
     save_training_history(
         hist_data,
@@ -79,6 +83,7 @@ def generate_experiment_plots(
     )
 
     # 3. Structuring elements from each MorphologicalDilation layer
+    print("[plots] step: structuring elements (all kernels + Pareto minimal per layer)", flush=True)
     erosion_layers = _get_erosion_layers(model)
     for layer_name, weights in erosion_layers:
         safe_name = layer_name.replace("/", "_")
@@ -86,6 +91,7 @@ def generate_experiment_plots(
 
         # 3a. All elements (limited to n_show)
         n_displayed = min(n_show, n_total)
+        print(f"  … structuring_elements all: {layer_name!r} ({n_displayed} of {n_total})", flush=True)
         plot_structuring_elements(
             weights,
             kernel_shape=kernel_shape,
@@ -101,6 +107,7 @@ def generate_experiment_plots(
             pareto_filters, _ = extract_pareto_filters(weights)
             n_pareto = pareto_filters.shape[1]
             if pareto_filters.size > 0:
+                print(f"  … structuring_elements pareto: {layer_name!r} (n_pareto={n_pareto})", flush=True)
                 plot_pareto_elements(
                     pareto_filters,
                     kernel_shape=kernel_shape,
@@ -113,6 +120,10 @@ def generate_experiment_plots(
 
     # 4. Weight snapshots: Pareto evolution + histogram row (uses Checkpoint/weight_snapshots/)
     if checkpoint_dir is not None:
+        print(
+            "[plots] step: weight snapshots — layer×time histogram grid (if manifest exists)",
+            flush=True,
+        )
         plot_data_dir = output_dir / "plot_data"
         generate_weight_evolution_artifacts(
             Path(checkpoint_dir) / "weight_snapshots",
@@ -120,4 +131,6 @@ def generate_experiment_plots(
             plot_data_dir,
             kernel_shape=kernel_shape,
             histogram_bins=weight_snapshot_histogram_bins,
+            max_histogram_snapshots=weight_snapshot_plot_max_histograms,
         )
+    print("[plots] finished", flush=True)

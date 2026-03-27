@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -51,6 +52,34 @@ def _values_minimal_vs_rest(
     return minimal_vals, rest_vals, pareto_mask
 
 
+def parse_weight_snapshot_plot_settings(train_cfg: dict) -> dict[str, Any]:
+    """Defaults match ``run_experiment`` / ``base.yaml`` for snapshot plot subsampling."""
+    if "weight_snapshot_plot_max_histograms" in train_cfg:
+        mh = train_cfg["weight_snapshot_plot_max_histograms"]
+        max_hist = None if mh is None else int(mh)
+    else:
+        max_hist = 10
+    return {
+        "max_histogram_snapshots": max_hist,
+        "histogram_bins": int(train_cfg.get("weight_snapshot_histogram_bins", 40)),
+    }
+
+
+def select_snapshots_for_histogram(
+    snapshots: list[dict],
+    max_count: int | None,
+) -> list[dict]:
+    """Evenly subsample snapshot entries (by manifest order) for histogram plots."""
+    if not snapshots:
+        return []
+    if max_count is None or max_count <= 0 or len(snapshots) <= max_count:
+        return list(snapshots)
+    n = len(snapshots)
+    idx = np.linspace(0, n - 1, max_count, dtype=int)
+    idx = np.unique(idx)
+    return [snapshots[i] for i in idx]
+
+
 def layer_keys_from_manifest(manifest_path: Path) -> list[str]:
     """Return sorted erosion layer keys (npz key prefixes) from the first readable snapshot."""
     manifest_path = Path(manifest_path)
@@ -71,260 +100,187 @@ def layer_keys_from_manifest(manifest_path: Path) -> list[str]:
     return []
 
 
-def plot_pareto_minimal_evolution(
+def plot_weight_histogram_grid_by_layers(
     manifest_path: Path,
-    kernel_shape: tuple[int, int],
-    layer_key: str,
-    save_path: Path,
-    plot_data_npz: Path,
-    plot_data_json: Path | None = None,
-) -> None:
-    """Rows = snapshot time; each row = Pareto-minimal structuring elements for that epoch."""
-    manifest_path = Path(manifest_path)
-    if not manifest_path.exists():
-        return
-
-    with open(manifest_path) as f:
-        manifest = json.load(f)
-
-    every_k = manifest.get("every_k_epochs")
-
-    snapshots = manifest.get("snapshots") or []
-    if not snapshots:
-        return
-
-    kernels_per_epoch: list[np.ndarray] = []
-    epochs_meta: list[dict] = []
-
-    for snap in snapshots:
-        rel = snap.get("file")
-        if not rel:
-            continue
-        npz_path = manifest_path.parent / rel
-        if not npz_path.exists():
-            continue
-        data = _load_npz(npz_path)
-        layers = dict(_split_weights_npz_keys(data))
-        w = layers.get(layer_key)
-        if w is None:
-            continue
-        pareto_filters, _ = extract_pareto_filters(w)
-        n_p = pareto_filters.shape[1]
-        if n_p == 0:
-            continue
-        kernels = pareto_filters.T.reshape(-1, *kernel_shape)
-        kernels_per_epoch.append(kernels)
-        epochs_meta.append(
-            {
-                "epoch_index": snap.get("epoch_index"),
-                "completed_epochs": snap.get("completed_epochs"),
-                "n_pareto": int(n_p),
-            }
-        )
-
-    if not kernels_per_epoch:
-        return
-
-    n_rows = len(kernels_per_epoch)
-    n_cols = max(k.shape[0] for k in kernels_per_epoch)
-
-    vmin = min(float(np.min(k)) for k in kernels_per_epoch)
-    vmax = max(float(np.max(k)) for k in kernels_per_epoch)
-
-    fig_h = max(1.5 * n_rows, 2.0)
-    fig_w = max(1.2 * n_cols, 1.1)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w * n_cols, fig_h), squeeze=False)
-    axes = _normalize_axes_2d(axes, n_rows, n_cols)
-    fig.suptitle(
-        f"Minimal structuring elements over training ({layer_key})",
-        fontsize=12,
-    )
-
-    for r, kernels in enumerate(kernels_per_epoch):
-        n_k = kernels.shape[0]
-        for c in range(n_cols):
-            ax = axes[r, c]
-            if c < n_k:
-                ax.imshow(
-                    kernels[c],
-                    cmap="gray",
-                    interpolation="nearest",
-                    vmin=vmin,
-                    vmax=vmax,
-                )
-            else:
-                ax.axis("off")
-            ax.set_xticks([])
-            ax.set_yticks([])
-        if r < len(epochs_meta):
-            ep = epochs_meta[r]
-            ce = ep.get("completed_epochs", "")
-            axes[r, 0].set_ylabel(
-                f"epoch {ce}\n(n={ep.get('n_pareto', '')})",
-                fontsize=8,
-                rotation=0,
-                labelpad=35,
-                va="center",
-            )
-
-    plt.tight_layout()
-    save_path = Path(save_path)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(save_path, bbox_inches="tight", dpi=150)
-    plt.close()
-
-    plot_data_npz = Path(plot_data_npz)
-    plot_data_npz.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        plot_data_npz,
-        layer=np.array(layer_key, dtype=object),
-        kernel_shape=np.array(kernel_shape),
-        epochs=np.array([m["completed_epochs"] for m in epochs_meta], dtype=np.int32),
-        epoch_indices=np.array([m["epoch_index"] for m in epochs_meta], dtype=np.int32),
-        n_pareto=np.array([m["n_pareto"] for m in epochs_meta], dtype=np.int32),
-        kernels=np.array(kernels_per_epoch, dtype=object),
-        vmin=np.array(vmin),
-        vmax=np.array(vmax),
-    )
-
-    json_payload = {
-        "layer": layer_key,
-        "kernel_shape": list(kernel_shape),
-        "every_k_epochs": every_k,
-        "colormap_range": [vmin, vmax],
-        "snapshots": epochs_meta,
-        "kernels_npz": plot_data_npz.name,
-        "description": (
-            "kernels_npz contains array 'kernels' (object array): one (n_pareto, H, W) "
-            "tensor per snapshot row in this figure."
-        ),
-    }
-    if plot_data_json is not None:
-        plot_data_json = Path(plot_data_json)
-        plot_data_json.parent.mkdir(parents=True, exist_ok=True)
-        with open(plot_data_json, "w") as f:
-            json.dump(json_payload, f, indent=2)
-
-
-def plot_weight_histogram_evolution(
-    manifest_path: Path,
-    layer_key: str,
+    layer_keys: list[str],
+    snapshots_subset: list[dict],
     save_path: Path,
     plot_data_json: Path,
     bins: int = 40,
+    plot_meta: dict | None = None,
 ) -> None:
-    """One row of histograms: red = Pareto-minimal filter weights, blue = others."""
+    """Rows = SupErosion (erosion) layers; cols = training time snapshots.
+
+    Each cell is **one** histogram of **all** scalar weights in that layer at that time,
+    with Pareto-minimal vs non-minimal counts overlaid (red / blue), not one subplot per kernel.
+    """
     manifest_path = Path(manifest_path)
-    if not manifest_path.exists():
+    if not manifest_path.exists() or not layer_keys or not snapshots_subset:
         return
 
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    snapshots = manifest.get("snapshots") or []
-    if not snapshots:
-        return
+    n_rows = len(layer_keys)
+    n_cols = len(snapshots_subset)
+    print(
+        f"[plots] weight / histogram grid | {n_rows} layer row(s) × {n_cols} time column(s) "
+        f"(all structuring elements pooled per cell)",
+        flush=True,
+    )
 
-    series: list[tuple[dict, np.ndarray, np.ndarray]] = []
+    # grid[i][j] = (minimal_vals, rest_vals) or None
+    grid: list[list[tuple[np.ndarray, np.ndarray] | None]] = [
+        [None for _ in range(n_cols)] for _ in range(n_rows)
+    ]
+    snap_meta: list[dict] = []
 
-    for snap in snapshots:
+    for j, snap in enumerate(snapshots_subset):
         rel = snap.get("file")
         if not rel:
             continue
         npz_path = manifest_path.parent / rel
         if not npz_path.exists():
             continue
+        ce = snap.get("completed_epochs")
+        print(
+            f"[plots] weight / histogram grid | column {j + 1}/{n_cols} | "
+            f"completed_epochs={ce!r} | file={rel!r}",
+            flush=True,
+        )
         data = _load_npz(npz_path)
         layers = dict(_split_weights_npz_keys(data))
-        w = layers.get(layer_key)
-        if w is None:
-            continue
-        min_v, rest_v, _ = _values_minimal_vs_rest(w)
-        series.append((snap, min_v, rest_v))
+        for i, layer_key in enumerate(layer_keys):
+            w = layers.get(layer_key)
+            if w is None:
+                continue
+            min_v, rest_v, _ = _values_minimal_vs_rest(w)
+            grid[i][j] = (min_v, rest_v)
+        snap_meta.append(
+            {
+                "epoch_index": snap.get("epoch_index"),
+                "completed_epochs": snap.get("completed_epochs"),
+                "file": rel,
+            }
+        )
 
-    if not series:
+    flat_vals: list[np.ndarray] = []
+    for row in grid:
+        for cell in row:
+            if cell is None:
+                continue
+            min_v, rest_v = cell
+            flat_vals.append(np.r_[min_v, rest_v])
+    if not flat_vals:
+        print("[plots] weight / histogram grid | no data, skipping", flush=True)
         return
 
-    all_vals = np.concatenate([np.r_[s[1], s[2]] for s in series])
+    all_vals = np.concatenate(flat_vals)
     lo, hi = float(np.min(all_vals)), float(np.max(all_vals))
     if lo == hi:
         lo -= 0.5
         hi += 0.5
     bin_edges = np.linspace(lo, hi, bins + 1)
 
-    n_snap = len(series)
-    fig, axes = plt.subplots(1, n_snap, figsize=(3.2 * n_snap, 3.5), squeeze=False)
-    axes_flat = axes[0]
+    print(
+        f"[plots] weight / histogram grid | building figure ({n_rows}×{n_cols}, bins={bins})",
+        flush=True,
+    )
+    fig_w = max(2.8 * n_cols, 6.0)
+    fig_h = max(2.8 * n_rows, 3.0)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
+    axes = _normalize_axes_2d(axes, n_rows, n_cols)
 
-    json_snapshots: list[dict] = []
+    cells_json: list[dict] = []
 
-    for ax, (snap, min_v, rest_v) in zip(axes_flat, series):
-        h_min, _ = np.histogram(min_v, bins=bin_edges)
-        h_rest, _ = np.histogram(rest_v, bins=bin_edges)
-        centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-        ax.bar(
-            centers,
-            h_rest,
-            width=(bin_edges[1] - bin_edges[0]) * 0.92,
-            align="center",
-            color="blue",
-            alpha=0.55,
-            label="non-minimal",
-        )
-        ax.bar(
-            centers,
-            h_min,
-            width=(bin_edges[1] - bin_edges[0]) * 0.92,
-            align="center",
-            color="red",
-            alpha=0.55,
-            label="Pareto minimal",
-        )
-        ce = snap.get("completed_epochs", "")
-        ax.set_title(f"completed epochs {ce}", fontsize=9)
-        ax.set_xlabel("weight value")
-        ax.set_ylabel("frequency")
-        ax.legend(fontsize=7)
+    for i, layer_key in enumerate(layer_keys):
+        for j in range(n_cols):
+            ax = axes[i, j]
+            cell = grid[i][j]
+            if cell is None:
+                ax.axis("off")
+                continue
+            min_v, rest_v = cell
+            h_min, _ = np.histogram(min_v, bins=bin_edges)
+            h_rest, _ = np.histogram(rest_v, bins=bin_edges)
+            centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+            ax.bar(
+                centers,
+                h_rest,
+                width=(bin_edges[1] - bin_edges[0]) * 0.92,
+                align="center",
+                color="blue",
+                alpha=0.55,
+                label="non-minimal",
+            )
+            ax.bar(
+                centers,
+                h_min,
+                width=(bin_edges[1] - bin_edges[0]) * 0.92,
+                align="center",
+                color="red",
+                alpha=0.55,
+                label="Pareto minimal",
+            )
+            ce = snapshots_subset[j].get("completed_epochs", "")
+            ax.set_title(f"epochs {ce}", fontsize=8)
+            ax.tick_params(axis="both", labelsize=7)
+            if i == n_rows - 1:
+                ax.set_xlabel("weight value", fontsize=8)
+            if j == 0:
+                ax.set_ylabel(f"{layer_key}\nfreq.", fontsize=8)
+            if i == 0 and j == n_cols - 1:
+                ax.legend(fontsize=6, loc="upper right")
 
-        json_snapshots.append(
-            {
-                "epoch_index": snap.get("epoch_index"),
-                "completed_epochs": snap.get("completed_epochs"),
-                "bin_edges": bin_edges.tolist(),
-                "histogram_minimal": h_min.astype(int).tolist(),
-                "histogram_non_minimal": h_rest.astype(int).tolist(),
-                "histogram_bin_centers": centers.tolist(),
-                "count_minimal": int(np.sum(h_min)),
-                "count_non_minimal": int(np.sum(h_rest)),
-                "n_minimal_scalar_weights": int(min_v.size),
-                "n_non_minimal_scalar_weights": int(rest_v.size),
-            }
-        )
+            cells_json.append(
+                {
+                    "layer": layer_key,
+                    "row": i,
+                    "col": j,
+                    "epoch_index": snapshots_subset[j].get("epoch_index"),
+                    "completed_epochs": snapshots_subset[j].get("completed_epochs"),
+                    "histogram_minimal": h_min.astype(int).tolist(),
+                    "histogram_non_minimal": h_rest.astype(int).tolist(),
+                    "histogram_bin_centers": centers.tolist(),
+                    "n_minimal_scalar_weights": int(min_v.size),
+                    "n_non_minimal_scalar_weights": int(rest_v.size),
+                }
+            )
 
     fig.suptitle(
-        f"Weight distributions (minimal vs rest) — {layer_key}",
+        "Weight distributions (all structuring elements per layer; minimal vs rest overlaid)",
         fontsize=11,
     )
     plt.tight_layout()
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[plots] weight / histogram grid | saving PNG → {save_path.name}", flush=True)
     plt.savefig(save_path, bbox_inches="tight", dpi=150)
     plt.close()
 
     payload = {
-        "layer": layer_key,
+        "plot_type": "histogram_grid_layers_x_time",
+        "layers": layer_keys,
         "histogram_bins": bins,
         "bin_edges": bin_edges.tolist(),
-        "snapshots": json_snapshots,
+        "snapshot_columns": snap_meta,
+        "cells": cells_json,
         "metadata": {
             "value_range": [lo, hi],
             "every_k_epochs": manifest.get("every_k_epochs"),
+            "description": (
+                "Each cell pools all kernel weights in that SupErosion layer at that time; "
+                "red/blue split is Pareto-minimal vs non-minimal filter weights."
+            ),
         },
     }
+    if plot_meta:
+        payload["plot_settings"] = plot_meta
     plot_data_json = Path(plot_data_json)
     plot_data_json.parent.mkdir(parents=True, exist_ok=True)
     with open(plot_data_json, "w") as f:
         json.dump(payload, f, indent=2)
+    print(f"[plots] weight / histogram grid | saved plot data → {plot_data_json.name}", flush=True)
 
 
 def generate_weight_evolution_artifacts(
@@ -333,32 +289,65 @@ def generate_weight_evolution_artifacts(
     plot_data_dir: Path,
     kernel_shape: tuple[int, int],
     histogram_bins: int = 40,
+    *,
+    max_histogram_snapshots: int | None = None,
 ) -> None:
-    """If ``manifest.json`` exists under snapshots dir, write PNGs and plot data files."""
+    """If ``manifest.json`` exists under snapshots dir, write PNG + JSON plot data.
+
+    One figure: **rows** = SupErosion (erosion) layers, **columns** = subsampled training times
+    (default up to ``weight_snapshot_plot_max_histograms``). Each cell histograms **all** weights
+    in that layer at that time.
+
+    Args:
+        max_histogram_snapshots: Max number of **time columns** (evenly spaced over saved snapshots).
+            ``None`` or <=0 means use all snapshots (can be slow with many files).
+    """
     weight_snapshots_dir = Path(weight_snapshots_dir)
-    manifest = weight_snapshots_dir / "manifest.json"
-    if not manifest.exists():
+    manifest_path = weight_snapshots_dir / "manifest.json"
+    if not manifest_path.exists():
         return
+
+    print(f"[plots] weight snapshots: reading manifest → {manifest_path}", flush=True)
+
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+    all_snapshots: list[dict] = list(manifest.get("snapshots") or [])
+    if not all_snapshots:
+        print("[plots] weight snapshots: manifest has no snapshots, skipping", flush=True)
+        return
+
+    hist_snaps = select_snapshots_for_histogram(all_snapshots, max_histogram_snapshots)
+
+    print(
+        f"[plots] weight snapshots: subsampling — manifest={len(all_snapshots)} → "
+        f"time columns={len(hist_snaps)} (max_hist={max_histogram_snapshots!r})",
+        flush=True,
+    )
 
     plots_dir = Path(plots_dir)
     plot_data_dir = Path(plot_data_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
     plot_data_dir.mkdir(parents=True, exist_ok=True)
 
-    for layer_key in layer_keys_from_manifest(manifest):
-        safe = layer_key.replace("/", "_")
-        plot_pareto_minimal_evolution(
-            manifest,
-            kernel_shape,
-            layer_key,
-            plots_dir / f"pareto_minimal_evolution_{safe}.png",
-            plot_data_dir / f"pareto_minimal_evolution_{safe}.npz",
-            plot_data_json=plot_data_dir / f"pareto_minimal_evolution_{safe}.json",
-        )
-        plot_weight_histogram_evolution(
-            manifest,
-            layer_key,
-            plots_dir / f"weight_histogram_evolution_{safe}.png",
-            plot_data_dir / f"weight_histogram_evolution_{safe}.json",
-            bins=histogram_bins,
-        )
+    meta_hist = {
+        "manifest_snapshots_total": len(all_snapshots),
+        "max_histogram_snapshots": max_histogram_snapshots,
+        "histogram_snapshots_used": len(hist_snaps),
+        "kernel_shape": list(kernel_shape),
+    }
+
+    layer_keys = layer_keys_from_manifest(manifest_path)
+    print(f"[plots] weight snapshots: layer rows (SupErosion blocks): {layer_keys!r}", flush=True)
+
+    if not layer_keys:
+        return
+
+    plot_weight_histogram_grid_by_layers(
+        manifest_path,
+        layer_keys,
+        hist_snaps,
+        plots_dir / "weight_histogram_evolution_grid.png",
+        plot_data_dir / "weight_histogram_evolution_grid.json",
+        bins=histogram_bins,
+        plot_meta=meta_hist,
+    )
