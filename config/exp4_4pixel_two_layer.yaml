@@ -1,0 +1,35 @@
+# Experiment 4: 4-pixel Average Filter (Two Layers)
+
+extends: base.yaml
+
+experiment:
+  name: exp4_4pixel_two_layer
+  description: "4-pixel average filter with two-layer SupErosions"
+
+ground_truth:
+  kernel:
+    - [0, 0.25, 0]
+    - [0.25, 0, 0.25]
+    - [0, 0.25, 0]
+
+model:
+  architecture: two_layer_sup_erosions
+  n_erosions_block1: 500
+  n_erosions_block2: 500
+  n_erosions_block3: 700
+  kernel_size: [3, 3]
+
+initialization:
+  strategy: uniform
+  block1:
+    minval: -0.35
+    maxval: 0.35
+  block2:
+    minval: -0.35
+    maxval: 0.35
+  block3:
+    minval: -0.35
+    maxval: 0.35
+
+training:
+  batch_size: 50

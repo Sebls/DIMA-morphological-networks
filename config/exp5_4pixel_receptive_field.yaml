@@ -1,0 +1,39 @@
+# Experiment 5: 4-pixel Filter with Receptive Field Specialization
+
+extends: base.yaml
+
+experiment:
+  name: exp5_4pixel_receptive_field
+  description: "4-pixel filter with zone-specialized receptive field"
+
+ground_truth:
+  kernel:
+    - [0, 0.25, 0]
+    - [0.25, 0, 0.25]
+    - [0, 0.25, 0]
+
+model:
+  architecture: two_layer_receptive_field
+  n_erosions_block1: 500
+  n_erosions_block2: 500
+  n_erosions_block3: 700
+  kernel_size: [3, 3]
+  # Block1: indices 0,1,2,3 active (top row + left); Block2: 4,5,6,7,8 active
+  block1_inactive_indices: [4, 5, 6, 7, 8]
+  block2_inactive_indices: [0, 1, 2, 3]
+  inactive_value: -10.0
+
+initialization:
+  strategy: uniform
+  block1:
+    minval: -0.35
+    maxval: 0.35
+  block2:
+    minval: -0.35
+    maxval: 0.35
+  block3:
+    minval: -0.35
+    maxval: 0.35
+
+training:
+  batch_size: 50
