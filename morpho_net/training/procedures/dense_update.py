@@ -1,4 +1,4 @@
-"""Placeholder for dense / full-batch style morphological updates."""
+"""Dense partition: gradient support (non-zero vs zero) with auxiliary submodel on the inactive part."""
 
 from __future__ import annotations
 
@@ -9,10 +9,11 @@ import keras
 import numpy as np
 
 from morpho_net.training.procedures.base import TrainingProcedure
+from morpho_net.training.procedures.structured_update import run_structured_update_training
 
 
 class DenseUpdateProcedure(TrainingProcedure):
-    """Reserved for non-minibatch or densely coupled update rules."""
+    """Structured two-phase training: global loss gradient where nonzero; auxiliary loss on zero-gradient region."""
 
     def run(
         self,
@@ -24,8 +25,13 @@ class DenseUpdateProcedure(TrainingProcedure):
         config: dict[str, Any],
         output_dir: str | Path | None,
     ) -> keras.callbacks.History:
-        del model, x_train, y_train, x_val, y_val, config, output_dir
-        raise NotImplementedError(
-            "training.update_method 'dense_update' is not implemented yet. "
-            "Implement TrainingProcedure.run with your dense update rule and register it."
+        return run_structured_update_training(
+            model,
+            x_train,
+            y_train,
+            x_val,
+            y_val,
+            config,
+            output_dir,
+            partition="dense",
         )

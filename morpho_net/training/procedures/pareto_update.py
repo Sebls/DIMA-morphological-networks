@@ -1,4 +1,4 @@
-"""Placeholder for Pareto-based weight updates (custom training step)."""
+"""Pareto-front partition: minimal structuring elements vs dominated (auxiliary submodel)."""
 
 from __future__ import annotations
 
@@ -9,10 +9,11 @@ import keras
 import numpy as np
 
 from morpho_net.training.procedures.base import TrainingProcedure
+from morpho_net.training.procedures.structured_update import run_structured_update_training
 
 
 class ParetoUpdateProcedure(TrainingProcedure):
-    """Reserved for training that incorporates Pareto structure during optimization."""
+    """Structured two-phase training: global loss gradient on Pareto-minimal SEs; auxiliary loss on dominated."""
 
     def run(
         self,
@@ -24,9 +25,13 @@ class ParetoUpdateProcedure(TrainingProcedure):
         config: dict[str, Any],
         output_dir: str | Path | None,
     ) -> keras.callbacks.History:
-        del model, x_train, y_train, x_val, y_val, config, output_dir
-        raise NotImplementedError(
-            "training.update_method 'pareto_update' is not implemented yet. "
-            "Subclass TrainingProcedure and implement a custom train_step or training loop, "
-            "then register it in morpho_net.training.registry."
+        return run_structured_update_training(
+            model,
+            x_train,
+            y_train,
+            x_val,
+            y_val,
+            config,
+            output_dir,
+            partition="pareto",
         )
