@@ -96,3 +96,6 @@ tmp/
 /bibliography/
 
 /slides/
+scripts/
+notebooks/dataset/
+notebooks/outputs/
