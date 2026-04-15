@@ -22,6 +22,10 @@ evaluate = "morpho_net.evaluate:main"
 dev = [
     "pytest>=7.0",
 ]
+experiment = [
+    "scikit-image>=0.22",
+    "scipy>=1.11",
+]
 
 [build-system]
 requires = ["hatchling"]
