@@ -12,14 +12,17 @@
 #     name: python3
 # ---
 
-# %% [markdown] id="4ab037c6"
-# # Learning morphological gradients with antidilations and relaxed TSEI constraints
+# %%
+from __future__ import annotations
+
+# %% [markdown] id="7926a94d"
+# # Learning morphological gradients with antidilations and relaxed SIEM constraints
 #
-# This script follows the outline: mathematical background, data, targets, models (TSEI 1-block / 2-block, dual-dilation baseline, and
+# This script follows the outline: mathematical background, data, targets, models (SIEM 1-block / 2-block, dual-dilation baseline, and
 # supremum-of-erosions baselines), experiments, training-curve analysis, prediction comparison, and
 # interpretation.
 
-# %% colab={"base_uri": "https://localhost:8080/"} id="acQcuWaL0I-J" outputId="83fd61cc-0469-4524-84f2-7ddf4c9d10c6"
+# %% colab={"base_uri": "https://localhost:8080/"} id="acQcuWaL0I-J" outputId="75f09bac-54f7-4096-c1a3-d2d848cbdce2"
 # !pip install scikit-image matplotlib
 
 # %% [markdown] id="c555bc79"
@@ -57,14 +60,14 @@
 # For each filter index $m$, let $b^\varepsilon_{m,y}, b^{\delta^*}_{m,y} \in \mathbb{R}$ be learned
 # parameters indexed by $y \in W$. A scalar $K \in \mathbb{R}$ may also be learned.
 #
-# ### 1.2 TSEI single-block map
+# ### 1.2 SIEM single-block map
 #
-# We use a **Trainable Sup–Inf** style morphological block (TSEI) that combines an erosion-like branch
+# We use a **Trainable Sup–Inf** style morphological block (SIEM) that combines an erosion-like branch
 # and an **antidilation** branch, then takes a supremum over filters and an optional global scale $K$.
 # For input $f$ and patch index $x$, with 2D patches $P$ over a window $W$,
 #
 # $$
-# \varepsilon_m(f)(x) = -\max_{y \in W}\bigl(-f(x+y) - b^{\varepsilon}_{m,y}\bigr)
+# \varepsilon_m(f)(x) = -\max_{y \in W}\bigl(-f(x+y) + b^{\varepsilon}_{m,y}\bigr)
 #        = \min_{y \in W}\bigl(f(x+y) - b^{\varepsilon}_{m,y}\bigr),
 # $$
 #
@@ -82,7 +85,7 @@
 #
 # ### 1.3 Two-block composition
 #
-# A deeper map stacks two TSEI blocks with independent parameters:
+# A deeper map stacks two SIEM blocks with independent parameters:
 #
 # $$
 # \Psi(f) = \psi^{(2)}\!\bigl(\psi^{(1)}(f)\bigr).
@@ -103,7 +106,7 @@
 #
 # A closely related baseline applies two parallel morphological dilations (erosion as $-\delta(-f)$),
 # takes a per-pixel minimum across the two branches, then a supremum over filters and a scalar scale—matching
-# the “MyOwn” construction in earlier notebooks.
+# the original dual-dilation SIEM layout used in earlier notebooks.
 #
 # ### 1.4.2 Supremum-of-erosions baselines
 #
@@ -121,11 +124,14 @@
 # %% [markdown] id="21b3ce13"
 # ## 2. Environment and setup
 
-# %% colab={"base_uri": "https://localhost:8080/"} id="bJCwmwzy_K18" outputId="670d07cd-7994-4933-80a0-a290635b6019"
+# %% colab={"base_uri": "https://localhost:8080/"} id="7a7b6ab7" outputId="36230b7a-3734-48c7-d684-968c4d8839bf"
 from google.colab import drive
 drive.mount('/content/drive')
 
-# %% colab={"base_uri": "https://localhost:8080/", "height": 71} id="Ba1dbcGl-6aX" outputId="4363ef67-37ec-4d1c-90ee-cdc625d0d2bf"
+# %% id="M5p3S4myH6Aw"
+# !cp /content/drive/MyDrive/experiments-dima/BSR_bsds500.tgz /content/
+
+# %% id="bcbfdbc9"
 from google.colab import files
 uploaded = files.upload()  # This will prompt you to select your BSDS500 .tgz file
 
@@ -138,8 +144,6 @@ archive_name = list(uploaded.keys())[0]
 # !tar -xf BSR_bsds500.tgz
 
 # %% id="512d3217"
-from __future__ import annotations
-
 import json
 import os
 import sys
@@ -161,14 +165,13 @@ N_VAL_SYN = 12
 N_TEST_SYN = 16
 
 # Model sizes (keep moderate for quick runs)
-NUM_FILTERS_TSEI = 48
-NUM_FILTERS_MYOWN = 48
+NUM_FILTERS_SIEM = 48
 N_EROSIONS_SINGLE = 64
 N_EROSIONS_TL1 = 48
 N_EROSIONS_TL2 = 48
 N_EROSIONS_TL3 = 64
 
-EPOCHS_MAIN = 500  # e.g. `TSEI_EPOCHS=40` for longer runs
+EPOCHS_MAIN = 500  # e.g. `SIEM_EPOCHS=40` for longer runs
 BATCH_SIZE = 2
 LEARNING_RATE = 1e-3
 
@@ -556,7 +559,7 @@ def resolve_data_pack() -> dict:
 # Supervision maps used below are implemented in the following cells. Each cell pairs a short LaTeX
 # definition with the corresponding NumPy builder.
 
-# %% [markdown] id="tgt-md-horizontal-diff"
+# %% [markdown] id="21e9473a"
 # ### Horizontal two-pixel map (half-difference)
 #
 # Non-increasing two-pixel map on horizontal neighbors:
@@ -565,16 +568,16 @@ def resolve_data_pack() -> dict:
 # y(x) = \tfrac{1}{2}\bigl(f(x_{\mathrm{left}}) - f(x_{\mathrm{right}})\bigr)
 # $$
 #
-# Output spatial size is $(H,\,W-1)$ before alignment to the TSEI valid grid.
+# Output spatial size is $(H,\,W-1)$ before alignment to the SIEM valid grid.
 
-# %% id="tgt-code-horizontal-diff"
+# %% id="0d944ea7"
 def np_target_horizontal_diff_half(x_bch: np.ndarray) -> np.ndarray:
     """Non-increasing two-pixel map (x_left - x_right)/2; shape (N, H, W-1, 1)."""
     x = x_bch[..., 0] if x_bch.ndim == 4 else x_bch
     return (0.5 * (x[:, :, :-1] - x[:, :, 1:]))[..., np.newaxis].astype(np.float32)
 
 
-# %% [markdown] id="tgt-md-mg9"
+# %% [markdown] id="d8a1c88b"
 # ### Vertical max–min gradient (“mg9” stencil)
 #
 # On each $3\times 3$ window position in `kernel_fi`, take vertically aligned pixels $u,v$ in the same column:
@@ -583,7 +586,7 @@ def np_target_horizontal_diff_half(x_bch: np.ndarray) -> np.ndarray:
 # y(x) = \max(u,v) - \min(u,v) = |u-v|.
 # $$
 
-# %% id="tgt-code-mg9"
+# %% id="e1ac6273"
 def kernel_fi_mg9(x_train: np.ndarray) -> np.ndarray:
     """Vertical |u-v| gradient on the 3x3 sliding grid; output (N, H-2, W-2, 1)."""
     outputs: list[float] = []
@@ -599,7 +602,7 @@ def kernel_fi_mg9(x_train: np.ndarray) -> np.ndarray:
     return out.reshape(x_train.shape[0], nh, nw, 1)
 
 
-# %% [markdown] id="tgt-md-vertical-morph"
+# %% [markdown] id="e141b69d"
 # ### Beucher-style vertical neighbor gradient (alternative stencil)
 #
 # On the inner $(H-1)\times(W-2)$ region, compare vertically stacked pixels $u,v$ at aligned columns:
@@ -610,7 +613,7 @@ def kernel_fi_mg9(x_train: np.ndarray) -> np.ndarray:
 #
 # (Different footprint than `kernel_fi_mg9`; useful as an alternative target.)
 
-# %% id="tgt-code-vertical-morph"
+# %% id="e1a475c6"
 def np_target_vertical_morph_gradient(x_bch: np.ndarray) -> np.ndarray:
     """Beucher-style vertical neighbor gradient on inner (H-1)x(W-2) (alternative stencil)."""
     x = x_bch[..., 0] if x_bch.ndim == 4 else x_bch
@@ -623,7 +626,7 @@ def np_target_vertical_morph_gradient(x_bch: np.ndarray) -> np.ndarray:
     return out
 
 
-# %% [markdown] id="tgt-md-disk-grad"
+# %% [markdown] id="30031b19"
 # ### Internal / external morphological gradient (disk $B$, skimage)
 #
 # Classical grayscale gradients with a planar structuring element $B$ (here `disk(1)`):
@@ -632,7 +635,7 @@ def np_target_vertical_morph_gradient(x_bch: np.ndarray) -> np.ndarray:
 # \rho^-_B(f) = f - f \ominus B,\qquad \rho^+_B(f) = f \oplus B - f.
 # $$
 
-# %% id="tgt-code-disk-grad"
+# %% id="1176050e"
 def np_batch_internal_gradient(x_bch: np.ndarray, fp=None) -> np.ndarray:
     from skimage.morphology import disk, erosion
 
@@ -653,14 +656,14 @@ def np_batch_external_gradient(x_bch: np.ndarray, fp=None) -> np.ndarray:
     return y[..., np.newaxis].astype(np.float32)
 
 
-# %% [markdown] id="tgt-md-tophats"
+# %% [markdown] id="6f055ac1"
 # ### White / black top-hats (disk $B$, skimage)
 #
 # $$
 # \mathrm{WTH}_B(f) = f - f \circ B,\qquad \mathrm{BTH}_B(f) = f \bullet B - f.
 # $$
 
-# %% id="tgt-code-tophats"
+# %% id="1d23484f"
 def np_batch_white_tophat(x_bch: np.ndarray, fp=None) -> np.ndarray:
     from skimage.morphology import disk, white_tophat
 
@@ -681,10 +684,10 @@ def np_batch_black_tophat(x_bch: np.ndarray, fp=None) -> np.ndarray:
     return y[..., np.newaxis].astype(np.float32)
 
 
-# %% [markdown] id="tgt-md-tsei-grid"
-# ### Alignment with the TSEI valid convolution grid
+# %% [markdown] id="9322e254"
+# ### Alignment with the SIEM valid convolution grid
 #
-# A single TSEI block with kernel $(k_h,k_w)$ uses valid patching, so spatial size shrinks by $k_h-1$
+# A single SIEM block with kernel $(k_h,k_w)$ uses valid patching, so spatial size shrinks by $k_h-1$
 # and $k_w-1$. After $n$ stacked blocks (same kernel),
 #
 # $$
@@ -693,8 +696,8 @@ def np_batch_black_tophat(x_bch: np.ndarray, fp=None) -> np.ndarray:
 #
 # Targets are **top-left cropped** to the same $(H_{\mathrm{out}},W_{\mathrm{out}})$ as the supervised map.
 
-# %% id="tgt-code-tsei-grid"
-def tsei_stacked_output_shape(
+# %% id="5df68a18"
+def siem_stacked_output_shape(
     h: int, w: int, kernel_size: tuple[int, int], n_blocks: int
 ) -> tuple[int, int]:
     kh, kw = int(kernel_size[0]), int(kernel_size[1])
@@ -711,30 +714,30 @@ def crop_y_to_output(y_bch: np.ndarray, h_out: int, w_out: int) -> np.ndarray:
     return y_bch[:, :h_out, :w_out, :]
 
 
-def labels_for_n_tsei_blocks(
+def labels_for_n_siem_blocks(
     y_ref: np.ndarray,
     h_in: int,
     w_in: int,
     kernel_size: tuple[int, int],
     n_blocks: int,
 ) -> tuple[np.ndarray, tuple[int, int]]:
-    ho, wo = tsei_stacked_output_shape(h_in, w_in, kernel_size, n_blocks)
+    ho, wo = siem_stacked_output_shape(h_in, w_in, kernel_size, n_blocks)
     return crop_y_to_output(y_ref, ho, wo), (ho, wo)
 
 
-def crop_target_to_tsei_grid(
+def crop_target_to_siem_grid(
     y: np.ndarray,
     h_in: int,
     w_in: int,
     kernel_size: tuple[int, int],
     n_blocks: int = 1,
 ) -> np.ndarray:
-    """Top-left crop of target maps to the valid TSEI output grid after ``n_blocks`` (default: 1-block)."""
-    ho, wo = tsei_stacked_output_shape(h_in, w_in, kernel_size, n_blocks)
+    """Top-left crop of target maps to the valid SIEM output grid after ``n_blocks`` (default: 1-block)."""
+    ho, wo = siem_stacked_output_shape(h_in, w_in, kernel_size, n_blocks)
     return crop_y_to_output(y, ho, wo)
 
 
-# %% [markdown] id="tgt-md-four-pixel"
+# %% [markdown] id="f87c6591"
 # ### Four-pixel morphological gradient on $2\times 2$ patches
 #
 # For each $2\times 2$ patch with values $x_1,\ldots,x_4$:
@@ -743,7 +746,7 @@ def crop_target_to_tsei_grid(
 # y = \max_i x_i - \min_i x_i .
 # $$
 
-# %% id="tgt-code-four-pixel"
+# %% id="6f06dcd1"
 def np_target_four_pixel_maxmin(x_bch: np.ndarray) -> np.ndarray:
     """Four-pixel morphological gradient on each 2×2 patch: max − min; shape (N, H−1, W−1, 1)."""
     x = x_bch[..., 0] if x_bch.ndim == 4 else x_bch
@@ -756,7 +759,7 @@ def np_target_four_pixel_maxmin(x_bch: np.ndarray) -> np.ndarray:
     return (mx - mn)[..., np.newaxis].astype(np.float32)
 
 
-# %% [markdown] id="tgt-md-pair-grad"
+# %% [markdown] id="a0adc741"
 # ### Two-pixel internal / external gradients (horizontal neighbors)
 #
 # Let $x_1$ be the left pixel and $x_2$ the right pixel in each horizontal pair.
@@ -771,7 +774,7 @@ def np_target_four_pixel_maxmin(x_bch: np.ndarray) -> np.ndarray:
 # m(x_1,x_2) = \max(x_1,x_2) - x_1.
 # $$
 
-# %% id="tgt-code-pair-grad"
+# %% id="c22f530a"
 def np_target_internal_gradient_pair(x_bch: np.ndarray) -> np.ndarray:
     """Two-pixel internal gradient: m(x₁,x₂) = x₁ − min(x₁,x₂) on horizontal neighbors; (N, H, W−1, 1)."""
     x = x_bch[..., 0] if x_bch.ndim == 4 else x_bch
@@ -788,15 +791,15 @@ def np_target_external_gradient_pair(x_bch: np.ndarray) -> np.ndarray:
     return (np.maximum(left, right) - left)[..., np.newaxis].astype(np.float32)
 
 
-# %% [markdown] id="tgt-md-registry"
+# %% [markdown] id="d084161e"
 # ### Target registry for `run_experiment(target_key=...)`
 #
 # String keys select which map above is used for training; all selected targets are cropped to the **one-block**
-# TSEI output grid via `crop_target_to_tsei_grid`. (Morphology helpers in skimage cells are available in code but
+# SIEM output grid via `crop_target_to_siem_grid`. (Morphology helpers in skimage cells are available in code but
 # not every key is wired into the registry.)
 
-# %% id="tgt-code-registry"
-#: Short names for `run_experiment(target_key=...)` — all are cropped to the 1-block TSEI valid grid.
+# %% id="c6a2b4d8"
+#: Short names for `run_experiment(target_key=...)` — all are cropped to the 1-block SIEM valid grid.
 TARGET_LABELS: dict[str, str] = {
     "mg9": "mg9 (vertical |u−v| on 3×3 stencil)",
     "horizontal_diff_half": "(x_left − x_right) / 2",
@@ -824,7 +827,7 @@ def compute_targets_for_experiment(
     *,
     kernel_size: tuple[int, int] = KERNEL_SIZE,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Compute train/val supervision tensors aligned to the 1-block TSEI output size."""
+    """Compute train/val supervision tensors aligned to the 1-block SIEM output size."""
     h_in = int(pack["H"])
     w_in = int(pack["W"])
     x_tr = pack["x_train"]
@@ -837,8 +840,8 @@ def compute_targets_for_experiment(
     target_fn = TARGET_REGISTRY[key]
     y_tr = target_fn(x_tr)
     y_va = target_fn(x_va)
-    y_tr = crop_target_to_tsei_grid(y_tr, h_in, w_in, kernel_size, 1)
-    y_va = crop_target_to_tsei_grid(y_va, h_in, w_in, kernel_size, 1)
+    y_tr = crop_target_to_siem_grid(y_tr, h_in, w_in, kernel_size, 1)
+    y_va = crop_target_to_siem_grid(y_va, h_in, w_in, kernel_size, 1)
     meta = {
         "target_key": key,
         "target_label": TARGET_LABELS[key],
@@ -855,10 +858,10 @@ def target_slug_for_files(target_key: str) -> str:
 
 
 # %% [markdown] id="be72fb64"
-# ## 6. Model definitions — TSEI block, dual-dilation baseline
+# ## 6. Model definitions — SIEM block, dual-dilation baseline
 
 # %% [markdown] id="mubzk98Z2KNm"
-# Below: learnable **dilation** (building block for grayscale erosions), **TSEI** and **ScaledOutput**,
+# Below: learnable **dilation** (building block for grayscale erosions), **SIEM** and **ScaledOutput**,
 # then **supremum-of-erosions** architectures matching the usual morphological-network zoo.
 
 # %% [markdown] id="M_engakS2Naq"
@@ -880,7 +883,7 @@ def extract_valid_patches_expanded(
     stride: tuple[int, int],
     padding: str,
 ):
-    """Extract patches and add a trailing singleton dim for per-patch offsets (shared by dilation / TSEI)."""
+    """Extract patches and add a trailing singleton dim for per-patch offsets (shared by dilation / SIEM)."""
     patches = keras.ops.image.extract_patches(
         inputs,
         kernel_size,
@@ -1089,7 +1092,7 @@ class ScaledOutput(keras.layers.Layer):
 
 
 # %% [markdown] id="UetFmsEk2cDJ"
-# ### 6.4 TSEI morphological block (`TSEIMorphologicalBlock`)
+# ### 6.4 SIEM morphological block (`SIEMMorphologicalBlock`)
 #
 # For each filter $m$, two parallel **max-pool**-style branches over a $k\times k$ patch (learned offsets
 # $b^\varepsilon_m$, $b^{\delta^*}_m$), then **min** across branches, then **sup over $m$**, optional **$K$**:
@@ -1107,7 +1110,7 @@ class ScaledOutput(keras.layers.Layer):
 # the two branches per $m$, **max over $m$**, optional **$K$**.
 
 # %% id="MZq02GfD2dmm"
-class TSEIMorphologicalBlock(keras.layers.Layer):
+class SIEMMorphologicalBlock(keras.layers.Layer):
     def __init__(
         self,
         num_filters: int = 32,
@@ -1195,13 +1198,122 @@ class TSEIMorphologicalBlock(keras.layers.Layer):
         return cfg
 
 
+class SIEMAlignedMorphologicalBlock(keras.layers.Layer):
+    """Same control flow as `SIEMMorphologicalBlock`, but each branch names the dual-dilation identity.
+
+    One patch tensor ``p``; erosion branch :math:`-((-f)\\oplus b)=-\\max(-p+b)`;
+    antidilation branch :math:`-(f\\oplus\\tilde b)=-\\max(p+\\tilde b)`; then min, sup over filters,
+    optional scalar ``K`` (not a separate `ScaledOutput`).
+    """
+
+    def __init__(
+        self,
+        num_filters: int = 32,
+        kernel_size: tuple[int, int] = (3, 3),
+        stride: tuple[int, int] = (1, 1),
+        padding: str = "VALID",
+        learnable_scale: bool = True,
+        weight_min: float = -0.15,
+        weight_max: float = 0.15,
+        weight_seed: int | None = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.num_filters = int(num_filters)
+        self.kernel_size = (
+            (int(kernel_size[0]), int(kernel_size[1]))
+            if isinstance(kernel_size, (tuple, list))
+            else (int(kernel_size), int(kernel_size))
+        )
+        self.stride = (
+            (int(stride[0]), int(stride[1]))
+            if isinstance(stride, (tuple, list))
+            else (int(stride), int(stride))
+        )
+        self.padding = padding
+        self.learnable_scale = learnable_scale
+        self.weight_min = weight_min
+        self.weight_max = weight_max
+        self.weight_seed = weight_seed
+
+    def build(self, input_shape):
+        kk = self.kernel_size[0] * self.kernel_size[1]
+        w_init = keras.initializers.RandomUniform(
+            minval=self.weight_min,
+            maxval=self.weight_max,
+            seed=self.weight_seed,
+        )
+        self.w_erosion = self.add_weight(
+            shape=(1, 1, 1, kk, self.num_filters),
+            initializer=w_init,
+            trainable=True,
+            name="dilation_weights_neg_input",
+        )
+        self.w_antidilation = self.add_weight(
+            shape=(1, 1, 1, kk, self.num_filters),
+            initializer=w_init,
+            trainable=True,
+            name="dilation_weights_pos_input",
+        )
+        if self.learnable_scale:
+            self.K = self.add_weight(
+                shape=(),
+                initializer=keras.initializers.Constant(1.0),
+                trainable=True,
+                name="lipschitz_scale",
+            )
+        else:
+            self.K = None
+
+    def call(self, inputs):
+        p = extract_valid_patches_expanded(
+            inputs, self.kernel_size, self.stride, self.padding
+        )
+        dil_on_neg_f = keras.ops.max(-p + self.w_erosion, axis=3)
+        erosion_like = -dil_on_neg_f
+        dil_on_f = keras.ops.max(p + self.w_antidilation, axis=3)
+        antidilation_like = -dil_on_f
+        inf_md = keras.ops.minimum(erosion_like, antidilation_like)
+        sup = keras.ops.max(inf_md, axis=-1, keepdims=True)
+        if self.K is not None:
+            sup = sup * self.K
+        return sup
+
+    def get_structuring_element_pair(self) -> tuple[np.ndarray, np.ndarray]:
+        we, wd = self.get_weights()[:2]
+        return we[0, 0, 0, :, :], wd[0, 0, 0, :, :]
+
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update(
+            {
+                "num_filters": self.num_filters,
+                "kernel_size": self.kernel_size,
+                "stride": self.stride,
+                "padding": self.padding,
+                "learnable_scale": self.learnable_scale,
+                "weight_min": self.weight_min,
+                "weight_max": self.weight_max,
+                "weight_seed": self.weight_seed,
+            }
+        )
+        return cfg
+
+
 # %% [markdown] id="Zl9ACAUG2f-5"
-# ### 6.5 TSEI and dual-dilation baseline models
+# ### 6.5 SIEM and dual-dilation baseline models
 #
-# **Single-block TSEI:** one map $\psi_K(f)$. **Two-block:** $\psi^{(2)}(\psi^{(1)}(f))$ with independent parameters.
+# **Single-block SIEM:** one map $\psi_K(f)$. **Two-block:** $\psi^{(2)}(\psi^{(1)}(f))$ with independent parameters.
 #
-# **MyOwn baseline:** two banks of dilations on $f$ and $-f$ (erosion / antidilation branches), **min** across
-# branches, **sup over filters**, then **ScaledOutput**:
+# **Original SIEM implementation (legacy stack):** two `MorphologicalDilation` layers (each runs its own patch
+# extraction) on $f$ and $-f$, **min**, **sup over filters**, then **`ScaledOutput`**.
+#
+# **SIEM aligned (dual-dilation path):** same paired branches, but **one** `extract_valid_patches_expanded`,
+# explicit intermediate dilations $\max(-p+b)$, $\max(p+\tilde b)$ with a final negation per branch, then the
+# same **min / sup / $K$** layout as `SIEMMorphologicalBlock` — fairer comparison than the legacy stacked-layer
+# graph.
+#
+# Legacy **original** stack as a formula (two separate `MorphologicalDilation` forwards, then **ScaledOutput**):
 #
 # $$
 # \eta(x) = \max_m \min\bigl( (f\ominus b_m)_\text{approx}(x),\, (-f \ominus \tilde b_m)_\text{approx}(x) \bigr),\quad
@@ -1209,7 +1321,7 @@ class TSEIMorphologicalBlock(keras.layers.Layer):
 # $$
 
 # %% id="OQs-Fx_42im4"
-def build_tsei_single_block_model(
+def build_siem_single_block_model(
     height: int,
     width: int,
     num_filters: int,
@@ -1217,21 +1329,21 @@ def build_tsei_single_block_model(
     stride: tuple[int, int] = (1, 1),
     padding: str = "VALID",
     learnable_scale: bool = True,
-    name: str = "tsei_single_block",
+    name: str = "siem_single_block",
 ) -> Model:
     inp = keras.layers.Input(shape=(height, width, 1), name="input")
-    out = TSEIMorphologicalBlock(
+    out = SIEMMorphologicalBlock(
         num_filters=num_filters,
         kernel_size=kernel_size,
         stride=stride,
         padding=padding,
         learnable_scale=learnable_scale,
-        name="tsei_block",
+        name="siem_block",
     )(inp)
     return Model(inputs=inp, outputs=out, name=name)
 
 
-def build_tsei_two_block_model(
+def build_siem_two_block_model(
     height: int,
     width: int,
     num_filters: int,
@@ -1239,29 +1351,28 @@ def build_tsei_two_block_model(
     stride: tuple[int, int] = (1, 1),
     padding: str = "VALID",
     learnable_scale: bool = True,
-    name: str = "tsei_two_block",
+    name: str = "siem_two_block",
 ) -> Model:
     inp = keras.layers.Input(shape=(height, width, 1), name="input")
-    x = TSEIMorphologicalBlock(
+    x = SIEMMorphologicalBlock(
         num_filters=num_filters,
         kernel_size=kernel_size,
         stride=stride,
         padding=padding,
         learnable_scale=learnable_scale,
-        name="tsei_block_1",
+        name="siem_block_1",
     )(inp)
-    x = TSEIMorphologicalBlock(
+    x = SIEMMorphologicalBlock(
         num_filters=num_filters,
         kernel_size=kernel_size,
         stride=stride,
         padding=padding,
         learnable_scale=learnable_scale,
-        name="tsei_block_2",
+        name="siem_block_2",
     )(x)
     return Model(inputs=inp, outputs=x, name=name)
 
-
-def build_myown_tsei_baseline_model(
+def build_siem_original_baseline_model(
     height: int,
     width: int,
     num_filters: int,
@@ -1296,7 +1407,36 @@ def build_myown_tsei_baseline_model(
     out_inf = keras.layers.Minimum()([out_e, out_ad])
     xout = keras.ops.max(out_inf, axis=-1, keepdims=True)
     kout = ScaledOutput(name="K_scale")(xout)
-    return Model(inputs=inp, outputs=kout, name="myown_tsei_baseline")
+    return Model(inputs=inp, outputs=kout, name="siem_original_baseline")
+
+
+def build_siem_aligned_model(
+    height: int,
+    width: int,
+    num_filters: int,
+    kernel_size: tuple[int, int] = (3, 3),
+    stride: tuple[int, int] = (1, 1),
+    padding: str = "VALID",
+    learnable_scale: bool = True,
+    weight_min: float = -0.15,
+    weight_max: float = 0.15,
+    weight_seed: int | None = None,
+    name: str = "siem_aligned_model",
+) -> Model:
+    """Dual-dilation identities with the same patch → min → sup → $K$ path as `SIEMMorphologicalBlock`."""
+    inp = keras.layers.Input(shape=(height, width, 1), name="input")
+    out = SIEMAlignedMorphologicalBlock(
+        num_filters=num_filters,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        learnable_scale=learnable_scale,
+        weight_min=weight_min,
+        weight_max=weight_max,
+        weight_seed=weight_seed,
+        name="siem_aligned_block",
+    )(inp)
+    return Model(inputs=inp, outputs=out, name=name)
 
 
 # %% [markdown] id="OVlf-DiI2lZr"
@@ -1501,9 +1641,9 @@ def build_two_layer_receptive_field(
 # %% [markdown] id="f1781a69"
 # ### Spatial alignment
 #
-# TSEI outputs live on a **valid** patch grid; single/two-layer **sup-erosion** models here keep full resolution
+# SIEM outputs live on a **valid** patch grid; single/two-layer **sup-erosion** models here keep full resolution
 # via symmetric padding. For a fair comparison we **top-left crop** full-resolution predictions to the
-# target tensor shape (reference = TSEI 1-block grid for the mg9 experiment).
+# target tensor shape (reference = SIEM 1-block grid for the mg9 experiment).
 
 # %% id="ee6e1b47"
 def crop_pred_to_y(pred: np.ndarray, y_ref: np.ndarray) -> np.ndarray:
@@ -1528,7 +1668,7 @@ def predict_mse(model: keras.Model, x: np.ndarray, y_ref: np.ndarray) -> float:
 def mse_crop_pred_to_true(y_true, y_pred):
     """Mean squared error after top-left cropping `y_pred` to the spatial size of `y_true`.
 
-    Needed when full-resolution sup-erosion models output $(H,W)$ maps but targets live on a valid TSEI grid.
+    Needed when full-resolution sup-erosion models output $(H,W)$ maps but targets live on a valid SIEM grid.
     """
     ht = keras.ops.shape(y_true)[1]
     wt = keras.ops.shape(y_true)[2]
@@ -1571,12 +1711,15 @@ def train_model(
 
 
 def extract_k_constants_from_model(model: keras.Model) -> dict[str, float]:
-    """Learnable global scales: TSEI ``lipschitz_scale`` per block, MyOwn ``ScaledOutput``."""
+    """Learnable global scales: SIEM / aligned ``lipschitz_scale`` per block, legacy ``ScaledOutput``."""
     out: dict[str, float] = {}
     for layer in model.layers:
-        if isinstance(layer, TSEIMorphologicalBlock) and layer.K is not None:
+        if (
+            isinstance(layer, (SIEMMorphologicalBlock, SIEMAlignedMorphologicalBlock))
+            and layer.K is not None
+        ):
             k_arr = keras.ops.convert_to_numpy(layer.K)
-            out[layer.name or "tsei_block"] = float(np.asarray(k_arr).reshape(()))
+            out[layer.name or "siem_block"] = float(np.asarray(k_arr).reshape(()))
         elif isinstance(layer, ScaledOutput):
             s_arr = keras.ops.convert_to_numpy(layer.scale)
             out[layer.name or "K_scale"] = float(np.asarray(s_arr).reshape(()))
@@ -1584,46 +1727,49 @@ def extract_k_constants_from_model(model: keras.Model) -> dict[str, float]:
 
 
 # %% [markdown] id="4a6d112a"
-# ## 7. TSEI experiments — training suite
+# ## 7. SIEM experiments — training suite
 #
 # Training uses `mse_crop_pred_to_true`: MSE after cropping the model output to the target’s height and
 # width (top-left crop). That matches full-resolution sup-erosion outputs to the valid-grid targets used
-# by TSEI / MyOwn.
+# by the SIEM family (explicit block, aligned dual-dilation, and original stack).
 #
-# Use ``models_to_train`` to select architectures (default: TSEI 1-block, TSEI 2-block, MyOwn — no
-# supremum-of-erosions baselines).
+# Use ``models_to_train`` to select architectures (default: ``siem_1block``, ``siem_2block``, ``siem_original``
+# — no supremum-of-erosions baselines).
 
 # %% id="2f61e0e2"
 ALL_MODEL_SLUGS: tuple[str, ...] = (
-    "tsei_1block",
-    "tsei_2block",
-    "myown_tsei",
+    "siem_1block",
+    "siem_2block",
+    "siem_original",
+    "siem_aligned",
     "single_sup",
     "two_layer_sup",
     "two_layer_rf",
 )
 
-#: Default experiment: main TSEI line + MyOwn only (no ``single_sup`` / ``two_layer_*``).
+#: Default experiment: single-stage SIEM, two-stage SIEM, and original SIEM stack only (no ``single_sup`` / ``two_layer_*``).
 DEFAULT_EXPERIMENT_MODELS: tuple[str, ...] = (
-    "tsei_1block",
-    "tsei_2block",
-    "myown_tsei",
+    "siem_1block",
+    "siem_2block",
+    "siem_original",
 )
 
 MODEL_DISPLAY_NAMES: dict[str, str] = {
-    "tsei_1block": "TSEI 1-block",
-    "tsei_2block": "TSEI 2-block",
-    "myown_tsei": "MyOwn baseline",
+    "siem_1block": "SIEM — sup–inf morphological block (single stage)",
+    "siem_2block": "SIEM — two stacked sup–inf morphological blocks",
+    "siem_original": "Original SIEM implementation (legacy dual-dilation stack)",
+    "siem_aligned": "SIEM — dual-dilation identities (aligned compute path)",
     "single_sup": "Single sup-erosions",
     "two_layer_sup": "Two-layer sup-erosions",
     "two_layer_rf": "Two-layer receptive field",
 }
 
-#: Preferred order for “three-way” TSEI / MyOwn comparison plots (subset filtered by what was trained).
+#: Preferred order for SIEM comparison plots (subset filtered by what was trained).
 PREFERRED_THREE_WAY_ORDER: tuple[str, ...] = (
-    "tsei_1block",
-    "tsei_2block",
-    "myown_tsei",
+    "siem_1block",
+    "siem_2block",
+    "siem_aligned",
+    "siem_original",
 )
 
 
@@ -1654,26 +1800,32 @@ def comparison_plot_slugs(suite: dict) -> list[str]:
 
 
 MODEL_REGISTRY: dict[str, dict[str, Any]] = {
-    "tsei_1block": {
-        "tsei_blocks": 1,
-        "build": lambda h, w, inp, ks: build_tsei_single_block_model(
-            h, w, NUM_FILTERS_TSEI, kernel_size=ks, learnable_scale=True
+    "siem_1block": {
+        "siem_blocks": 1,
+        "build": lambda h, w, inp, ks: build_siem_single_block_model(
+            h, w, NUM_FILTERS_SIEM, kernel_size=ks, learnable_scale=True
         ),
     },
-    "tsei_2block": {
-        "tsei_blocks": 2,
-        "build": lambda h, w, inp, ks: build_tsei_two_block_model(
-            h, w, NUM_FILTERS_TSEI, kernel_size=ks, learnable_scale=True
+    "siem_2block": {
+        "siem_blocks": 2,
+        "build": lambda h, w, inp, ks: build_siem_two_block_model(
+            h, w, NUM_FILTERS_SIEM, kernel_size=ks, learnable_scale=True
         ),
     },
-    "myown_tsei": {
-        "tsei_blocks": 1,
-        "build": lambda h, w, inp, ks: build_myown_tsei_baseline_model(
-            h, w, NUM_FILTERS_MYOWN, kernel_size=ks
+    "siem_original": {
+        "siem_blocks": 1,
+        "build": lambda h, w, inp, ks: build_siem_original_baseline_model(
+            h, w, NUM_FILTERS_SIEM, kernel_size=ks
+        ),
+    },
+    "siem_aligned": {
+        "siem_blocks": 1,
+        "build": lambda h, w, inp, ks: build_siem_aligned_model(
+            h, w, NUM_FILTERS_SIEM, kernel_size=ks, learnable_scale=True
         ),
     },
     "single_sup": {
-        "tsei_blocks": 1,
+        "siem_blocks": 1,
         "build": lambda h, w, inp, ks: build_single_sup_erosions(
             input_shape=inp,
             n_erosions=N_EROSIONS_SINGLE,
@@ -1684,7 +1836,7 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         ),
     },
     "two_layer_sup": {
-        "tsei_blocks": 1,
+        "siem_blocks": 1,
         "build": lambda h, w, inp, ks: build_two_layer_sup_erosions(
             input_shape=inp,
             n_erosions_block1=N_EROSIONS_TL1,
@@ -1694,7 +1846,7 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         ),
     },
     "two_layer_rf": {
-        "tsei_blocks": 1,
+        "siem_blocks": 1,
         "build": lambda h, w, inp, ks: build_two_layer_receptive_field(
             input_shape=inp,
             n_erosions_block1=N_EROSIONS_TL1,
@@ -1740,7 +1892,7 @@ def train_and_eval_suite(
     early_stopping_monitor: str = EARLY_STOPPING_MONITOR,
     early_stopping_restore_best_weights: bool = EARLY_STOPPING_RESTORE_BEST_WEIGHTS,
 ) -> dict:
-    """Train only the architectures listed in ``models_to_train`` (default: TSEI 1/2 + MyOwn).
+    """Train only the architectures listed in ``models_to_train`` (default: ``siem_1block``, ``siem_2block``, ``siem_original``).
 
     If ``checkpoint_root`` is set, each trained model is saved under ``checkpoint_root/<name>/`` as
     ``best.weights.h5`` (lowest ``val_loss``) and ``last.weights.h5`` (final epoch only).
@@ -1760,9 +1912,9 @@ def train_and_eval_suite(
 
     slugs = parse_models_to_train(models_to_train)
     y_tr_2 = y_va_2 = None
-    if "tsei_2block" in slugs:
-        y_tr_2, _ = labels_for_n_tsei_blocks(y_train, h_in, w_in, kernel_size, 2)
-        y_va_2, _ = labels_for_n_tsei_blocks(y_val, h_in, w_in, kernel_size, 2)
+    if "siem_2block" in slugs:
+        y_tr_2, _ = labels_for_n_siem_blocks(y_train, h_in, w_in, kernel_size, 2)
+        y_va_2, _ = labels_for_n_siem_blocks(y_val, h_in, w_in, kernel_size, 2)
 
     ck = checkpoint_root
     results: dict = {
@@ -1790,7 +1942,7 @@ def train_and_eval_suite(
     for slug in slugs:
         spec = MODEL_REGISTRY[slug]
         y_tr_use, y_va_use = y_train, y_val
-        if int(spec["tsei_blocks"]) == 2:
+        if int(spec["siem_blocks"]) == 2:
             assert y_tr_2 is not None and y_va_2 is not None
             y_tr_use, y_va_use = y_tr_2, y_va_2
         model = build_experiment_model(
@@ -2117,15 +2269,15 @@ def plot_training_overlay_train_val_log(
     )
 
 
-def visualize_tsei_pair_grids(
-    tsei_layer: TSEIMorphologicalBlock,
+def visualize_siem_pair_grids(
+    siem_layer: SIEMMorphologicalBlock | SIEMAlignedMorphologicalBlock,
     kh: int,
     kw: int,
     max_filters: int = 6,
     title_prefix: str = "",
     save_path: Path | None = None,
 ) -> None:
-    be, bd = tsei_layer.get_structuring_element_pair()
+    be, bd = siem_layer.get_structuring_element_pair()
     m = min(max_filters, be.shape[1])
     fig, axes = plt.subplots(2, m, figsize=(2 * m, 4), squeeze=False)
     for j in range(m):
@@ -2371,34 +2523,39 @@ def plot_suite_structuring_elements(
     show: bool = False,
     experiment_label: str = "experiment",
 ) -> list[Path]:
-    """Export structuring-element visualizations for models present in ``results`` (TSEI, MyOwn, etc.)."""
+    """Export structuring-element visualizations for models present in ``results`` (SIEM variants and baselines)."""
     _pse = plot_structuring_elements
     if _pse is None:
         return []
     written: list[Path] = []
     models = results.get("models") or {}
     specs: list[tuple[np.ndarray, str]] = []
-    if "tsei_1block" in models:
-        m1 = models["tsei_1block"]
-        lay1 = m1.get_layer("tsei_block")
+    if "siem_1block" in models:
+        m1 = models["siem_1block"]
+        lay1 = m1.get_layer("siem_block")
         w_eps, w_del = lay1.get_weights()[0], lay1.get_weights()[1]
         specs.extend(
             [
-                (w_eps, "tsei1_b_epsilon"),
-                (w_del, "tsei1_b_delta_star"),
+                (w_eps, "siem1_b_epsilon"),
+                (w_del, "siem1_b_delta_star"),
             ]
         )
-    if "tsei_2block" in models:
-        m2 = models["tsei_2block"]
+    if "siem_2block" in models:
+        m2 = models["siem_2block"]
         for b in (1, 2):
-            lay = m2.get_layer(f"tsei_block_{b}")
+            lay = m2.get_layer(f"siem_block_{b}")
             we, wd = lay.get_weights()[0], lay.get_weights()[1]
-            specs.append((we, f"tsei2_block{b}_b_epsilon"))
-            specs.append((wd, f"tsei2_block{b}_b_delta_star"))
-    if "myown_tsei" in models:
-        mb = models["myown_tsei"]
+            specs.append((we, f"siem2_block{b}_b_epsilon"))
+            specs.append((wd, f"siem2_block{b}_b_delta_star"))
+    if "siem_original" in models:
+        mb = models["siem_original"]
         specs.append((mb.get_layer("Erosions").get_weights()[0], "baseline_erosions"))
         specs.append((mb.get_layer("Antidilations").get_weights()[0], "baseline_antidilations"))
+    if "siem_aligned" in models:
+        ma = models["siem_aligned"]
+        lay = ma.get_layer("siem_aligned_block")
+        specs.append((lay.get_weights()[0], "siem_aligned_erosion_branch"))
+        specs.append((lay.get_weights()[1], "siem_aligned_antidilation_branch"))
     if "single_sup" in models:
         specs.append(
             (
@@ -2455,19 +2612,19 @@ def run_comparison_plots(
         plot_training_curves_overlay(
             suite,
             log_scale=False,
-            save_path=plots_dir / f"{tslug}_tsei_three_way_overlay.png",
+            save_path=plots_dir / f"{tslug}_siem_three_way_overlay.png",
             target_label=tlab,
             model_slugs=comp,
         )
-        saved.append(plots_dir / f"{tslug}_tsei_three_way_overlay.png")
+        saved.append(plots_dir / f"{tslug}_siem_three_way_overlay.png")
         plot_training_curves_overlay(
             suite,
             log_scale=True,
-            save_path=plots_dir / f"{tslug}_tsei_three_way_overlay_log.png",
+            save_path=plots_dir / f"{tslug}_siem_three_way_overlay_log.png",
             target_label=tlab,
             model_slugs=comp,
         )
-        saved.append(plots_dir / f"{tslug}_tsei_three_way_overlay_log.png")
+        saved.append(plots_dir / f"{tslug}_siem_three_way_overlay_log.png")
     plot_val_loss_overlay(
         suite,
         title=f"Validation loss — all models ({tlab})",
@@ -2501,12 +2658,12 @@ def run_comparison_plots(
             y_val,
             input_title="Input (full res.)",
             n_samples=n_pred_samples,
-            save_path=plots_dir / f"{tslug}_tsei_prediction_three_way.png",
+            save_path=plots_dir / f"{tslug}_siem_prediction_three_way.png",
             suptitle=f"{tlab}: input, target, and selected model predictions",
             target_label=tlab,
             model_slugs=comp,
         )
-        saved.append(plots_dir / f"{tslug}_tsei_prediction_three_way.png")
+        saved.append(plots_dir / f"{tslug}_siem_prediction_three_way.png")
     plot_prediction_row(
         pack,
         suite,
@@ -2535,7 +2692,7 @@ def run_comparison_plots(
                 save_path=plots_dir / f"{tslug}_prediction_with_bsds_contours.png",
                 suptitle=(
                     f"BSDS: input, human boundaries, target ({tlab}), "
-                    "TSEI / MyOwn preds"
+                    "SIEM family preds"
                 ),
                 target_label=tlab,
                 model_slugs=comp,
@@ -2558,18 +2715,30 @@ def run_comparison_plots(
             target_label=tlab,
         )
         saved.append(plots_dir / "prediction_all_models_with_bsds_contours.png")
-    m1 = suite["models"].get("tsei_1block")
-    lay = m1.get_layer("tsei_block") if m1 is not None else None
-    if m1 is not None and isinstance(lay, TSEIMorphologicalBlock):
-        visualize_tsei_pair_grids(
+    m1 = suite["models"].get("siem_1block")
+    lay = m1.get_layer("siem_block") if m1 is not None else None
+    if m1 is not None and isinstance(lay, SIEMMorphologicalBlock):
+        visualize_siem_pair_grids(
             lay,
             KERNEL_SIZE[0],
             KERNEL_SIZE[1],
             max_filters=6,
-            title_prefix="1-block ",
-            save_path=plots_dir / "tsei_b_eps_b_delta.png",
+            title_prefix="SIEM single-stage ",
+            save_path=plots_dir / "siem_b_eps_b_delta.png",
         )
-        saved.append(plots_dir / "tsei_b_eps_b_delta.png")
+        saved.append(plots_dir / "siem_b_eps_b_delta.png")
+    m_oa = suite["models"].get("siem_aligned")
+    lay_oa = m_oa.get_layer("siem_aligned_block") if m_oa is not None else None
+    if m_oa is not None and isinstance(lay_oa, SIEMAlignedMorphologicalBlock):
+        visualize_siem_pair_grids(
+            lay_oa,
+            KERNEL_SIZE[0],
+            KERNEL_SIZE[1],
+            max_filters=6,
+            title_prefix="SIEM aligned ",
+            save_path=plots_dir / "siem_aligned_b_eps_b_delta.png",
+        )
+        saved.append(plots_dir / "siem_aligned_b_eps_b_delta.png")
     se_paths = plot_suite_structuring_elements(
         suite,
         (KERNEL_SIZE[0], KERNEL_SIZE[1]),
@@ -2599,7 +2768,7 @@ def build_experiment_metadata(
             "batch_size": BATCH_SIZE,
             "learning_rate": LEARNING_RATE,
             "kernel_size": list(KERNEL_SIZE),
-            "num_filters_tsei": NUM_FILTERS_TSEI,
+            "num_filters_siem": NUM_FILTERS_SIEM,
             "bsds_root": BSDS_ROOT,
             "training_callback_mode": TRAINING_CALLBACK_MODE,
             "val_loss_early_stop_threshold": VAL_LOSS_EARLY_STOP_THRESHOLD,
@@ -2685,7 +2854,7 @@ def print_experiment_console_summary(
         "batch_size",
         "learning_rate",
         "kernel_size",
-        "num_filters_tsei",
+        "num_filters_siem",
         "training_callback_mode",
         "val_loss_early_stop_threshold",
         "early_stopping_patience",
@@ -2742,14 +2911,14 @@ def experiment_run_markdown(run_dir: Path, suite: dict, *, target_key: str = "mg
         "- **Early stopping** — Controlled by `TRAINING_CALLBACK_MODE` (`patience` uses Keras `EarlyStopping` with `min_delta` / `patience`; optional fixed threshold). With `restore_best_weights=True`, the fitted model matches the best epoch before `load_best_weights_if_present` reloads from disk.",
         "",
         "**Plots (under `plots/`):**",
-        f"- `{tslug}_tsei_three_way_overlay*.png` — Train/val curves for the preferred comparison subset; linear and log.",
-        "- `val_loss_overlay*.png` / `train_val_overlay*.png` — All six architectures; linear and log superpositions.",
+        f"- `{tslug}_siem_three_way_overlay*.png` — Train/val curves for the preferred comparison subset; linear and log.",
+        "- `val_loss_overlay*.png` / `train_val_overlay*.png` — All models from the run; linear and log superpositions.",
         "- `*_loss.png` / `*_loss_log.png` — Per-model train/val curves.",
-        f"- `{tslug}_tsei_prediction_three_way.png` — Input, supervision target, one column per model in that subset.",
+        f"- `{tslug}_siem_prediction_three_way.png` — Input, supervision target, one column per model in that subset.",
         "- `prediction_comparison_all_models.png` — Same idea including sup-erosion baselines.",
         f"- `{tslug}_prediction_with_bsds_contours.png` / `prediction_all_models_with_bsds_contours.png` — When BSDS `groundTruth` is available: L-channel, **human boundary map**, target, then model preds.",
-        "- `tsei_b_eps_b_delta.png` — Learned ε / δ* filters for the 1-block TSEI.",
-        "- `tsei*_*.png`, `baseline_*.png`, `single_sup_erosion.png` — Structuring-element grids.",
+        "- `siem_b_eps_b_delta.png` — Learned ε / δ* filters for the 1-block SIEM.",
+        "- `siem*_*.png`, `baseline_*.png`, `single_sup_erosion.png` — Structuring-element grids.",
         "",
         "**Validation MSE (best checkpoint weights):**",
     ]
@@ -2824,15 +2993,14 @@ def show_plots_from_saved_run(
 
 # %% [markdown] id="493a016f"
 # ## 10. Interpretation
-# - **Antidilation vs supremum-of-erosions:** TSEI and the MyOwn baseline explicitly pair an erosion-like
-#   branch with an antidilation branch before the outer supremum; the sup-erosion baselines stack
-#   supremum-of-erosions maps without that paired antidilation structure (except as implicit in deeper
-#   combining layers).
-# - **Depth:** A second TSEI block learns a map on the **feature map** produced by the first block (valid
+# - **Antidilation vs supremum-of-erosions:** SIEM-style models explicitly pair an erosion-like branch with an
+#   antidilation branch before the outer supremum; the sup-erosion baselines stack supremum-of-erosions maps
+#   without that paired antidilation structure (except as implicit in deeper combining layers).
+# - **Depth:** A second SIEM block learns a map on the **feature map** produced by the first block (valid
 #   geometry); two-layer models here combine parallel first-stage maps or masked receptive fields.
-# - **Scale $K$:** The learnable scalar in `TSEIMorphologicalBlock` (and `ScaledOutput` in the MyOwn
-#   baseline) absorbs global amplitude, which helps match gradient magnitudes when patch-wise operations
-#   are only approximately 1-Lipschitz in practice.
+# - **Scale $K$:** The learnable scalar in `SIEMMorphologicalBlock` and `SIEMAlignedMorphologicalBlock` (and
+#   `ScaledOutput` in the original legacy stack) absorbs global amplitude, which helps match gradient magnitudes
+#   when patch-wise operations are only approximately 1-Lipschitz in practice.
 
 # %% [markdown] id="3717641a"
 # ## 11. Experiment driver
@@ -2842,7 +3010,7 @@ def show_plots_from_saved_run(
 # **end** (§11c)—CLI only, not extra benchmarks. Run **only** one target cell at a time. For post-hoc plots,
 # use §11b.
 
-# %% colab={"base_uri": "https://localhost:8080/"} id="fc7e2acc" outputId="6d0b4d74-1b70-4c43-a519-c94b6c2a3e2d"
+# %% id="4aca11ff"
 def run_experiment(
     target_key: str = "mg9",
     out_dir: Path | str | None = None,
@@ -2859,9 +3027,9 @@ def run_experiment(
         One of :func:`list_target_keys` — e.g. ``\"mg9\"``, ``\"horizontal_diff_half\"``,
         ``\"four_pixel_maxmin\"``, ``\"internal_gradient_pair\"``, ``\"external_gradient_pair\"``.
     models_to_train
-        Subset of :data:`ALL_MODEL_SLUGS`; default :data:`DEFAULT_EXPERIMENT_MODELS` (TSEI 1/2 + MyOwn,
-        no supremum baselines). Example — full zoo:
-        ``(\"tsei_1block\", \"tsei_2block\", \"myown_tsei\", \"single_sup\", \"two_layer_sup\", \"two_layer_rf\")``.
+        Subset of :data:`ALL_MODEL_SLUGS`; default :data:`DEFAULT_EXPERIMENT_MODELS` (``siem_1block``,
+        ``siem_2block``, ``siem_original``; no supremum baselines). Example — full zoo:
+        ``(\"siem_1block\", \"siem_2block\", \"siem_original\", \"siem_aligned\", \"single_sup\", \"two_layer_sup\", \"two_layer_rf\")``.
     """
     import matplotlib
 
@@ -2927,7 +3095,7 @@ def run_experiment(
     return suite
 
 
-# %% [markdown] id="exp-md-how-run-experiment-works"
+# %% [markdown] id="4cdbbcae"
 # ### 11a. How `run_experiment` works
 #
 # **`run_experiment(target_key, ...)`** runs the full training + logging pipeline for one choice of
@@ -2939,9 +3107,9 @@ def run_experiment(
 #    `exp_<target_slug>_YYYY-MM-DD_HHMMSS` when `dated_subdir=True`, containing `plots/` and `checkpoints/`.
 # 3. **Data** — `resolve_data_pack()` loads BSDS or synthetic images (`x_train`, `x_val`, …).
 # 4. **Targets** — `compute_targets_for_experiment(pack, target_key)` builds `y_train`, `y_val` and crops
-#    them to the **one-block TSEI** valid grid; metadata (`target_key`, shapes) is merged into JSON later.
+#    them to the **one-block SIEM** valid grid; metadata (`target_key`, shapes) is merged into JSON later.
 # 5. **Training** — `train_and_eval_suite(..., models_to_train=...)` fits only the architectures you list
-#    (default `DEFAULT_EXPERIMENT_MODELS`: TSEI 1-block, TSEI 2-block, MyOwn). Checkpoints:
+#    (default `DEFAULT_EXPERIMENT_MODELS`: ``siem_1block``, ``siem_2block``, ``siem_original``). Checkpoints:
 #    `checkpoints/<model>/best.weights.h5` and `last.weights.h5`.
 # 6. **Artifacts** — `write_metrics_and_metadata` writes `metadata.json` (hyperparameters, `models_to_train`,
 #    versions) and `metrics.json` (per-epoch `loss` / `val_loss` per model, final `val_mse`).
@@ -2960,67 +3128,67 @@ def run_experiment(
 # **Tip:** Execute **one** target cell at a time below; each run trains all selected models and can take a
 # long time. Do not “Run All” unless you intend to queue every benchmark.
 
-# %% [markdown] id="exp-md-target-mg9"
+# %% [markdown] id="cd4a2f2f"
 # #### Experiment — `mg9` (vertical $|u{-}v|$ on the $3\times 3$ stencil)
 
-# %% id="exp-code-target-mg9"
+# %% id="dc9b5bba"
 suite_mg9 = run_experiment(
     "mg9",
-    out_dir="_outputs",
+    out_dir='/content/outputs',
     notebook=True,
     dated_subdir=True,
 )
 RUN_DIR_MG9 = Path(suite_mg9["experiment_run_dir"])
 
-# %% [markdown] id="exp-md-target-horizontal-diff"
+# %% [markdown] id="c33ef0a0"
 # #### Experiment — `horizontal_diff_half`: ($m(x_1,x_2)=\tfrac{1}{2}(x_1-x_2)$)
 
-# %% id="exp-code-target-horizontal-diff"
+# %% id="674aa056" colab={"base_uri": "https://localhost:8080/", "height": 1000} outputId="1f066222-881a-4c1c-be93-49deb530df5c"
 suite_horizontal_diff = run_experiment(
     "horizontal_diff_half",
-    out_dir="_outputs",
+    out_dir='/content/outputs',
     notebook=True,
     dated_subdir=True,
 )
 RUN_DIR_HORIZONTAL_DIFF = Path(suite_horizontal_diff["experiment_run_dir"])
 
-# %% [markdown] id="exp-md-target-four-pixel"
+# %% [markdown] id="4e1bcd03"
 # #### Experiment — `four_pixel_maxmin` (max − min on each $2\times 2$ patch)
 
-# %% id="exp-code-target-four-pixel"
+# %% id="29997502" colab={"base_uri": "https://localhost:8080/", "height": 1000} outputId="a3206a2a-e81f-4705-c1b2-a65404ac94ec"
 suite_four_pixel_maxmin = run_experiment(
     "four_pixel_maxmin",
-    out_dir="_outputs",
+    out_dir='/content/outputs',
     notebook=True,
     dated_subdir=True,
 )
 RUN_DIR_FOUR_PIXEL = Path(suite_four_pixel_maxmin["experiment_run_dir"])
 
-# %% [markdown] id="exp-md-target-internal-pair"
+# %% [markdown] id="06dba0ef"
 # #### Experiment — `internal_gradient_pair`: \(x_1 - \min(x_1,x_2)\) (horizontal neighbors)
 
-# %% id="exp-code-target-internal-pair"
+# %% id="0c2a8b5b" colab={"base_uri": "https://localhost:8080/", "height": 1000} outputId="242aa9c9-d716-40dc-e6cb-f6700bd4294a"
 suite_internal_pair = run_experiment(
     "internal_gradient_pair",
-    out_dir="_outputs",
+    out_dir='/content/outputs',
     notebook=True,
     dated_subdir=True,
 )
 RUN_DIR_INTERNAL_PAIR = Path(suite_internal_pair["experiment_run_dir"])
 
-# %% [markdown] id="exp-md-target-external-pair"
+# %% [markdown] id="dfc6a483"
 # #### Experiment — `external_gradient_pair`: \(\max(x_1,x_2) - x_1\) (horizontal neighbors)
 
-# %% id="exp-code-target-external-pair"
+# %% id="ae4e4b3e" colab={"base_uri": "https://localhost:8080/", "height": 1000} outputId="79188dc6-65ca-4e1a-e98f-99b02b7db0ab"
 suite_external_pair = run_experiment(
     "external_gradient_pair",
-    out_dir="_outputs",
+    out_dir='/content/outputs',
     notebook=True,
     dated_subdir=True,
 )
 RUN_DIR_EXTERNAL_PAIR = Path(suite_external_pair["experiment_run_dir"])
 
-# %% [markdown] id="exp-md-post-training"
+# %% [markdown] id="84554c60"
 # ### 11b. Post-training: reload best checkpoints and redraw plots
 #
 # Set `RUN_DIR` to a folder produced by `run_experiment` (it must contain `metadata.json`, `metrics.json`,
@@ -3028,14 +3196,14 @@ RUN_DIR_EXTERNAL_PAIR = Path(suite_external_pair["experiment_run_dir"])
 # weights, reads curves from `metrics.json`, and redraws comparisons. Default output: `plots/replay/` so
 # training-time PNGs are not overwritten.
 
-# %%
+# %% id="d00949c8"
 # from pathlib import Path
 # RUN_DIR = Path("_outputs") / "exp_mg9_2026-01-01_000000"  # set to your latest run folder
 
-# %%
+# %% id="aea9ed03"
 # show_plots_from_saved_run(RUN_DIR, notebook=True, plot_subdir="replay")
 
-# %% [markdown] id="exp-md-cli-entry"
+# %% [markdown] id="321bddca"
 # ### 11c. Command-line entry (`main`) — not a notebook benchmark
 #
 # This block exists so you can run **`python exp_antidilation_morpho_gradients.py`** (or Colab) and execute a
@@ -3043,7 +3211,7 @@ RUN_DIR_EXTERNAL_PAIR = Path(suite_external_pair["experiment_run_dir"])
 # supervised-target experiments above; those are driven by the **`run_experiment(target_key=...)`** cells in
 # §11a. Keep this section **last** so all notebook experiments stay grouped above.
 
-# %% id="exp-code-cli-main"
+# %% id="d0c04128"
 def main(
     out_dir: Path | str | None = None,
     *,
@@ -3059,5 +3227,5 @@ def main(
 if __name__ == "__main__":
     main(out_dir="/content/outputs", notebook=False, dated_subdir=True)
 
-# %% id="5hN9eK0F_O46"
+# %% id="2d0c6ee2"
 # !cp -r '/content/outputs/' '/content/drive/MyDrive/experiments-dima/outputs/'
