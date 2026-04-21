@@ -15,6 +15,10 @@
 # %%
 from __future__ import annotations
 
+# %%
+from google.colab import drive
+drive.mount('/content/drive')
+
 # %% [markdown]
 # # Four-pixel average — supremum-of-erosions experiments
 #
@@ -99,14 +103,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 from keras.datasets import fashion_mnist
-
-# %%
-def _this_module_dir() -> Path:
-    """Directory of this file; in Jupyter, ``__file__`` is undefined so we use ``cwd``."""
-    try:
-        return Path(__file__).resolve().parent
-    except NameError:
-        return Path.cwd()
 
 # %%
 RANDOM_SEED = 42
@@ -213,6 +209,15 @@ def load_fashion_mnist_four_pixel_pack(
 #
 # Ground truth is one `Conv2D` with fixed **4-pixel average** weights, then `predict` on normalized inputs.
 # Below: **conv / model_gt**, stacked **Y** tensors, and helpers that bundle labels for training and metadata.
+
+# %% [markdown] id="5KEFBcgrdlCK"
+# The theoretical representation of this filter resembles to:
+#
+# [0, $r_1$, 0]
+# [$r_2$, 0, $r_3$]
+# [0, -$r_1$-$r_2$-$r_3$, 0]    
+# with $r_1,r_2,r_3 \in R$.
+
 
 # %% [markdown]
 # ### 4.1 Ground truth — `model_gt` and 4-pixel average labels
@@ -2558,7 +2563,7 @@ def run_experiment(
 
     matplotlib.use("Agg")
 
-    parent = Path(out_dir or _this_module_dir() / "_outputs").expanduser()
+    parent = Path(out_dir).expanduser()
     parent.mkdir(parents=True, exist_ok=True)
     prefix = f"exp_{EXPERIMENT_TARGET_SLUG}"
     if dated_subdir:
@@ -2650,7 +2655,7 @@ def run_experiment_repeated(
     if n < 1:
         raise ValueError("n_repetitions must be >= 1")
 
-    parent = Path(out_dir or _this_module_dir() / "_outputs").expanduser()
+    parent = Path(out_dir).expanduser()
     parent.mkdir(parents=True, exist_ok=True)
     prefix = f"exp_{EXPERIMENT_TARGET_SLUG}_repeated"
     if dated_subdir:
@@ -2795,7 +2800,7 @@ def run_k_deactivated_initialization_experiment(
     - TwoLayerSupErosionsArchitecture with k in {0,1,2,3,4}
     where k=0 is the default random initialization.
     """
-    parent = Path(out_dir or _this_module_dir() / "_outputs").expanduser()
+    parent = Path(out_dir).expanduser()
     parent.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
     root = parent / f"exp_{EXPERIMENT_TARGET_SLUG}_k_deactivated_{ts}"
@@ -2857,18 +2862,31 @@ def run_k_deactivated_initialization_experiment(
 
 
 # %%
-def main(
-    out_dir: Path | str | None = None,
-    *,
-    notebook: bool = False,
-    dated_subdir: bool = True,
-) -> dict:
-    return run_experiment(
-        out_dir=out_dir, notebook=notebook, dated_subdir=dated_subdir
+# def main(
+#     out_dir: Path | str | None = None,
+#     *,
+#     notebook: bool = False,
+#     dated_subdir: bool = True,
+# ) -> dict:
+#     return run_experiment(
+#         out_dir=out_dir, notebook=notebook, dated_subdir=dated_subdir
+#     )
+
+# if __name__ == "__main__":
+#     main(notebook=False, dated_subdir=True)
+
+# %%
+run_experiment(
+        out_dir='/content/outputs', notebook=False, dated_subdir=True
     )
 
-if __name__ == "__main__":
-    main(notebook=False, dated_subdir=True)
+# %%
+run_k_deactivated_initialization_experiment(
+    out_dir='/content/outputs', notebook=False, dated_subdir=True
+)
+
+# %%
+# !cp -r '/content/outputs/' '/content/drive/MyDrive/experiments-dima/outputs/'
 
 # %% [markdown]
 # ## 11. Execution (notebooks)
@@ -2879,13 +2897,6 @@ if __name__ == "__main__":
 # For **paper-style** variability statistics, uncomment **`run_experiment_repeated`** (or pass **`n_repetitions=...`**
 # to override **`N_TRAINING_REPETITIONS`** temporarily).
 
-# %%
-# suite_four_pixel = run_experiment(notebook=True, dated_subdir=True)
-# RUN_DIR_FOUR_PIXEL = Path(suite_four_pixel["experiment_run_dir"])
-
-# %%
-# repeated = run_experiment_repeated(notebook=True, dated_subdir=True)
-# REPEATED_SUMMARY_PATH = Path(repeated["summary_path"])
 
 # %% [markdown]
 # ### Subset of models
@@ -2902,14 +2913,3 @@ if __name__ == "__main__":
 #     ],
 # )
 # ```
-
-# %% [markdown] id="5KEFBcgrdlCK"
-# The theoretical representation of this filter resembles to:
-#
-#
-# [0, $r_1$, 0]
-#
-# [$r_2$, 0, $r_3$]
-#
-#
-# [0, -$r_1$-$r_2$-$r_3$, 0]    with $r_1,r_2,r_3 \in R$.
