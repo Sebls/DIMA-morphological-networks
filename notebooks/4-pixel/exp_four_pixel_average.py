@@ -412,6 +412,33 @@ class SupErosions_block(keras.layers.Layer):
         return config
 
 
+def apply_k_deactivated_structuring_elements_init(
+    model: keras.Model,
+    *,
+    k_deactivated_components: int = 0,
+    inactive_value: float = -10.0,
+) -> None:
+    """
+    Set `k` random patch components to `inactive_value` for all filters in each
+    `MyOwnDilation` layer of `model`.
+    """
+    k = int(k_deactivated_components)
+    if k <= 0:
+        return
+    for layer in model.layers:
+        if not isinstance(layer, MyOwnDilation):
+            continue
+        w = np.asarray(layer.get_weights()[0], dtype=np.float32)
+        patch_size = int(w.shape[3])
+        if k > patch_size:
+            raise ValueError(
+                f"k_deactivated_components={k} is larger than patch size {patch_size}."
+            )
+        inactive_idx = np.random.choice(patch_size, size=k, replace=False)
+        w[0, 0, 0, inactive_idx, :] = inactive_value
+        layer.set_weights([w])
+
+
 # %% [markdown]
 # ### 5.3 One-layer SupErosions model
 #
@@ -423,7 +450,13 @@ class SingleSupErosionsArchitecture:
     display_name = "Single-layer supremum of erosions"
 
     @classmethod
-    def build(cls, input_shape: tuple[int, int, int], kernel_size: tuple[int, int]) -> keras.Model:
+    def build(
+        cls,
+        input_shape: tuple[int, int, int],
+        kernel_size: tuple[int, int],
+        *,
+        k_deactivated_components: int = 0,
+    ) -> keras.Model:
         # The SupErosions model (symmetric pad so valid 3x3 covers the full image)
         padding = (kernel_size[0] // 2, kernel_size[1] // 2)
         input_im = keras.layers.Input(shape=input_shape, name="inputLayer")
@@ -439,7 +472,11 @@ class SingleSupErosionsArchitecture:
             name="Erosion",
         )(-input_padding)
         xout = keras.ops.max(out_erosions, axis=-1, keepdims=True)
-        return keras.Model(input_im, xout, name=cls.slug)
+        model = keras.Model(input_im, xout, name=cls.slug)
+        apply_k_deactivated_structuring_elements_init(
+            model, k_deactivated_components=k_deactivated_components
+        )
+        return model
 
 
 # %% [markdown]
@@ -454,7 +491,13 @@ class TwoLayerSupErosionsArchitecture:
     display_name = "Two-layer sup-erosions (parallel banks + combiner)"
 
     @classmethod
-    def build(cls, input_shape: tuple[int, int, int], kernel_size: tuple[int, int]) -> keras.Model:
+    def build(
+        cls,
+        input_shape: tuple[int, int, int],
+        kernel_size: tuple[int, int],
+        *,
+        k_deactivated_components: int = 0,
+    ) -> keras.Model:
         padding = (kernel_size[0] // 2, kernel_size[1] // 2)
         input_im = keras.layers.Input(shape=input_shape, name="inputLayer")
         input_padding = keras.layers.ZeroPadding2D(padding=padding)(input_im)
@@ -487,7 +530,11 @@ class TwoLayerSupErosionsArchitecture:
             seed=RANDOM_SEED,
             name="SupErosions_3",
         )([sup_erosions1, sup_erosions2])
-        return keras.Model(input_im, xout, name=cls.slug)
+        model = keras.Model(input_im, xout, name=cls.slug)
+        apply_k_deactivated_structuring_elements_init(
+            model, k_deactivated_components=k_deactivated_components
+        )
+        return model
 
 
 # %% [markdown]
@@ -522,7 +569,13 @@ class TwoLayerReceptiveFieldArchitecture:
     display_name = "Two-layer sup-erosions + receptive-field masks"
 
     @classmethod
-    def build(cls, input_shape: tuple[int, int, int], kernel_size: tuple[int, int]) -> keras.Model:
+    def build(
+        cls,
+        input_shape: tuple[int, int, int],
+        kernel_size: tuple[int, int],
+        *,
+        k_deactivated_components: int = 0,
+    ) -> keras.Model:
         padding = (kernel_size[0] // 2, kernel_size[1] // 2)
         input_im = keras.layers.Input(shape=input_shape, name="inputLayer")
         input_padding = keras.layers.ZeroPadding2D(padding=padding)(input_im)
@@ -559,6 +612,9 @@ class TwoLayerReceptiveFieldArchitecture:
         )([sup_erosions1, sup_erosions2])
         model = keras.Model(input_im, xout, name=cls.slug)
         model.build((None,) + input_shape)
+        apply_k_deactivated_structuring_elements_init(
+            model, k_deactivated_components=k_deactivated_components
+        )
         _apply_receptive_field_masks(
             model,
             RF_BLOCK1_INACTIVE,
@@ -1178,6 +1234,7 @@ def train_and_eval_suite(
     sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
     sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
     sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
+    k_deactivated_components: int = 0,
 ) -> dict:
     h_in = int(pack["H"])
     w_in = int(pack["W"])
@@ -1198,6 +1255,7 @@ def train_and_eval_suite(
         "sparse_mask_min": float(sparse_mask_min),
         "sparse_mask_max": float(sparse_mask_max),
         "sparse_grad_zero_atol": float(sparse_grad_zero_atol),
+        "k_deactivated_components": int(k_deactivated_components),
     }
 
     def _cbs(name: str) -> list[keras.callbacks.Callback]:
@@ -1213,7 +1271,11 @@ def train_and_eval_suite(
 
     for arch_cls in arch_list:
         slug = arch_cls.slug
-        model = arch_cls.build(input_shape, kernel_size)
+        model = arch_cls.build(
+            input_shape,
+            kernel_size,
+            k_deactivated_components=k_deactivated_components,
+        )
         disp = arch_cls.display_name
         print("\n" + "=" * 72)
         print(f"Model — before training: {disp} ({slug})")
@@ -2418,6 +2480,7 @@ def build_experiment_metadata(
             "sparse_grad_zero_atol": suite.get(
                 "sparse_grad_zero_atol", SPARSE_GRAD_ZERO_ATOL
             ),
+            "k_deactivated_components": suite.get("k_deactivated_components", 0),
         },
         "checkpoint_root": suite.get("checkpoint_root"),
         "val_mse": dict(suite["val_mse"]),
@@ -2468,6 +2531,7 @@ def run_experiment(
     sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
     sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
     sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
+    k_deactivated_components: int = 0,
 ) -> dict:
     import matplotlib
 
@@ -2509,6 +2573,7 @@ def run_experiment(
         sparse_mask_min=sparse_mask_min,
         sparse_mask_max=sparse_mask_max,
         sparse_grad_zero_atol=sparse_grad_zero_atol,
+        k_deactivated_components=k_deactivated_components,
     )
     suite["experiment_run_dir"] = str(run_dir.resolve())
     weight_pair_log_files = save_weight_pair_logs(suite, run_dir / "weight_pair_logs")
@@ -2554,6 +2619,7 @@ def run_experiment_repeated(
     sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
     sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
     sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
+    k_deactivated_components: int = 0,
 ) -> dict[str, Any]:
     import matplotlib
 
@@ -2609,6 +2675,7 @@ def run_experiment_repeated(
             sparse_mask_min=sparse_mask_min,
             sparse_mask_max=sparse_mask_max,
             sparse_grad_zero_atol=sparse_grad_zero_atol,
+            k_deactivated_components=k_deactivated_components,
         )
         suite["experiment_run_dir"] = str(rep_dir.resolve())
         suite["repetition_index"] = rep
@@ -2692,6 +2759,79 @@ def run_experiment_repeated(
         "summary_path": str(summary_path),
         "summary": summary,
         "last_suite": last_suite,
+    }
+
+
+# %%
+def run_k_deactivated_initialization_experiment(
+    out_dir: Path | str | None = None,
+    *,
+    notebook: bool = False,
+) -> dict[str, Any]:
+    """
+    Run 10 trainings total:
+    - SingleSupErosionsArchitecture with k in {0,1,2,3,4}
+    - TwoLayerSupErosionsArchitecture with k in {0,1,2,3,4}
+    where k=0 is the default random initialization.
+    """
+    parent = Path(out_dir or _this_module_dir() / "_outputs").expanduser()
+    parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+    root = parent / f"exp_{EXPERIMENT_TARGET_SLUG}_k_deactivated_{ts}"
+    root.mkdir(parents=True, exist_ok=True)
+
+    arch_slugs = [
+        SingleSupErosionsArchitecture.slug,
+        TwoLayerSupErosionsArchitecture.slug,
+    ]
+    k_values = [0, 1, 2, 3, 4]
+    runs: list[dict[str, Any]] = []
+
+    for arch_slug in arch_slugs:
+        for k in k_values:
+            tag = "normal_init" if k == 0 else f"k_deactivated_{k}"
+            run_dir = root / f"{arch_slug}__{tag}"
+            print(
+                f"\n{'=' * 72}\nRunning {arch_slug} with "
+                f"{'normal init' if k == 0 else f'k-deactivated init (k={k})'}\n{'=' * 72}"
+            )
+            suite = run_experiment(
+                out_dir=run_dir,
+                models_to_train=[arch_slug],
+                notebook=notebook,
+                dated_subdir=False,
+                k_deactivated_components=k,
+            )
+            runs.append(
+                {
+                    "architecture": arch_slug,
+                    "k_deactivated_components": k,
+                    "run_dir": str(run_dir.resolve()),
+                    "val_mse": {
+                        key: float(value) for key, value in suite.get("val_mse", {}).items()
+                    },
+                }
+            )
+
+    summary = {
+        "protocol": "k_deactivated_initialization_grid",
+        "architectures": arch_slugs,
+        "k_values": k_values,
+        "n_total_runs": len(runs),
+        "runs": runs,
+    }
+    summary_path = root / "k_deactivated_summary.json"
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    print("\n" + "=" * 72)
+    print(f"K-deactivated experiment root: {root.resolve()}")
+    print(f"Summary: {summary_path.resolve()}")
+    print("=" * 72 + "\n")
+    return {
+        "root_dir": str(root.resolve()),
+        "summary_path": str(summary_path.resolve()),
+        "summary": summary,
     }
 
 
