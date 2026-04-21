@@ -2158,23 +2158,44 @@ def plot_combiner_pareto_pairs(
     if len(pairs) == 0:
         return []
     n = len(pairs)
-    cols = min(10, n)
-    rows = int(np.ceil(n / cols))
-    fig, axes = plt.subplots(rows, cols, figsize=(2 * cols, 2 * rows))
-    axes = np.atleast_2d(axes)
-    vmin, vmax = float(np.min(pairs)), float(np.max(pairs))
-    for i in range(rows * cols):
-        r, c = divmod(i, cols)
-        ax = axes[r, c]
-        if i < n:
-            bar = pairs[i].reshape(1, 2)
-            ax.imshow(bar, cmap="gray", aspect="auto", vmin=vmin, vmax=vmax)
-            for j in range(2):
-                val = pairs[i, j]
-                color = "blue" if val > 0 else "red"
-                ax.text(j, 0, f"{val:.2f}", ha="center", va="center", color=color, fontsize=8)
-        ax.axis("off")
-    plt.suptitle(f"{title} — Pareto pairs (w1, w2) — n={n}", fontsize=12)
+    x = pairs[:, 0]
+    y = pairs[:, 1]
+    x_min, x_max = float(np.min(x)), float(np.max(x))
+    y_min, y_max = float(np.min(y)), float(np.max(y))
+    x_span = max(x_max - x_min, 1e-6)
+    y_span = max(y_max - y_min, 1e-6)
+    x_pad = 0.08 * x_span
+    y_pad = 0.08 * y_span
+
+    fig, ax = plt.subplots(figsize=(7.2, 6.2))
+    ax.scatter(x, y, s=22, c="black", alpha=0.8, edgecolors="none")
+    ax.set_xlim(x_min - x_pad, x_max + x_pad)
+    ax.set_ylim(y_min - y_pad, y_max + y_pad)
+    ax.set_xlabel("w1")
+    ax.set_ylabel("w2")
+    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
+    ax.axhline(0.0, color="gray", linewidth=0.8, alpha=0.7)
+    ax.axvline(0.0, color="gray", linewidth=0.8, alpha=0.7)
+    ax.set_title(f"{title} — Pareto pairs (w1, w2) — n={n}", fontsize=12)
+
+    has_outside_zoom_region = bool(
+        np.any((x < -1.0) | (x > 1.0) | (y < -1.0) | (y > 1.0))
+    )
+    if has_outside_zoom_region:
+        inset = ax.inset_axes([0.60, 0.08, 0.35, 0.35])
+        inset.scatter(x, y, s=18, c="black", alpha=0.85, edgecolors="none")
+        inset.set_xlim(-1.0, 1.0)
+        inset.set_ylim(-1.0, 1.0)
+        inset.set_xticks([-1.0, 0.0, 1.0])
+        inset.set_yticks([-1.0, 0.0, 1.0])
+        inset.xaxis.set_ticks_position("bottom")
+        inset.yaxis.set_ticks_position("left")
+        inset.tick_params(axis="both", labelsize=8)
+        inset.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
+        inset.axhline(0.0, color="gray", linewidth=0.7, alpha=0.7)
+        inset.axvline(0.0, color="gray", linewidth=0.7, alpha=0.7)
+        ax.indicate_inset_zoom(inset, edgecolor="0.35", alpha=0.9)
+
     plt.tight_layout()
     saved: list[Path] = []
     if save_path is not None:
