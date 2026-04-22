@@ -15,10 +15,6 @@
 # %%
 from __future__ import annotations
 
-# %%
-from google.colab import drive
-drive.mount('/content/drive')
-
 # %% [markdown]
 # # Four-pixel average — supremum-of-erosions experiments
 #
@@ -424,8 +420,8 @@ def apply_k_deactivated_structuring_elements_init(
     inactive_value: float = -10.0,
 ) -> None:
     """
-    Set `k` random patch components to `inactive_value` for all filters in each
-    `MyOwnDilation` layer of `model`.
+    Set `k` random patch components to `inactive_value` in each structuring
+    element (filter) of every `MyOwnDilation` layer in `model`.
     """
     k = int(k_deactivated_components)
     if k <= 0:
@@ -439,8 +435,10 @@ def apply_k_deactivated_structuring_elements_init(
             raise ValueError(
                 f"k_deactivated_components={k} is larger than patch size {patch_size}."
             )
-        inactive_idx = np.random.choice(patch_size, size=k, replace=False)
-        w[0, 0, 0, inactive_idx, :] = inactive_value
+        n_filters = int(w.shape[4])
+        for filt in range(n_filters):
+            inactive_idx = np.random.choice(patch_size, size=k, replace=False)
+            w[0, 0, 0, inactive_idx, filt] = inactive_value
         layer.set_weights([w])
 
 
@@ -668,6 +666,20 @@ def parse_models_to_train(models: Sequence[str] | None) -> list[type]:
 def comparison_plot_slugs(suite: dict) -> list[str]:
     have = suite.get("models") or {}
     return [s for s in PREFERRED_MODEL_ORDER if s in have]
+
+
+def canonical_architecture_slug(model_key: str) -> str:
+    """Map a suite model key (e.g. ``single_sup__kd2``) to a registered architecture slug."""
+    if model_key in ARCHITECTURE_BY_SLUG:
+        return model_key
+    for base in ARCHITECTURE_BY_SLUG:
+        if model_key.startswith(f"{base}__kd"):
+            return base
+    return model_key
+
+
+def k_deactivated_variant_slug(base_slug: str, k: int) -> str:
+    return f"{base_slug}__kd{int(k)}"
 
 
 # %% [markdown]
@@ -1078,7 +1090,7 @@ def build_training_callbacks(
     restore_best_weights: bool = True,
 ) -> list[keras.callbacks.Callback]:
     cbs: list[keras.callbacks.Callback] = []
-    if model_slug == SingleSupErosionsArchitecture.slug:
+    if canonical_architecture_slug(model_slug) == SingleSupErosionsArchitecture.slug:
         cbs.append(StructuringElementPairLoggerCallback())
     if ck_root is not None:
         d = ck_root / model_slug
@@ -1320,6 +1332,129 @@ def train_and_eval_suite(
     return results
 
 
+def train_and_eval_k_deactivated_variants_suite(
+    pack: dict,
+    y_train: np.ndarray,
+    y_val: np.ndarray,
+    *,
+    base_arch_slugs: Sequence[str],
+    k_values: Sequence[int],
+    kernel_size: tuple[int, int] = KERNEL_SIZE,
+    epochs: int = EPOCHS_MAIN,
+    batch_size: int = BATCH_SIZE,
+    lr: float = LEARNING_RATE,
+    verbose: int = 1,
+    checkpoint_root: Path | None = None,
+    callback_mode: str = TRAINING_CALLBACK_MODE,
+    val_loss_threshold: float | None = VAL_LOSS_EARLY_STOP_THRESHOLD,
+    early_stopping_patience: int = EARLY_STOPPING_PATIENCE,
+    early_stopping_min_delta: float = EARLY_STOPPING_MIN_DELTA,
+    early_stopping_restore_best_weights: bool = EARLY_STOPPING_RESTORE_BEST_WEIGHTS,
+    update_rule: str = TRAINING_UPDATE_RULE,
+    sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
+    sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
+    sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
+) -> dict:
+    """Train each base architecture for every ``k`` in ``k_values`` in one suite (composite model keys)."""
+    h_in = int(pack["H"])
+    w_in = int(pack["W"])
+    x_tr = pack["x_train"]
+    x_va = pack["x_val"]
+    input_shape = (h_in, w_in, 1)
+    ck = checkpoint_root
+    ks = [int(k) for k in k_values]
+    bases = [str(s).strip() for s in base_arch_slugs]
+    for b in bases:
+        if b not in ARCHITECTURE_BY_SLUG:
+            raise ValueError(
+                f"Unknown architecture slug {b!r}. Use one of: {list(ARCHITECTURE_BY_SLUG.keys())}"
+            )
+    models_to_train: list[str] = []
+    init_variants: list[dict[str, Any]] = []
+    for b in bases:
+        for k in ks:
+            variant = k_deactivated_variant_slug(b, k)
+            models_to_train.append(variant)
+            init_variants.append(
+                {"base_slug": b, "k_deactivated_components": k, "variant_slug": variant}
+            )
+
+    results: dict = {
+        "input_shape": input_shape,
+        "histories": {},
+        "val_mse": {},
+        "models": {},
+        "weight_pair_logs": {},
+        "models_to_train": models_to_train,
+        "checkpoint_root": str(ck) if ck is not None else None,
+        "update_rule": str(update_rule),
+        "sparse_mask_min": float(sparse_mask_min),
+        "sparse_mask_max": float(sparse_mask_max),
+        "sparse_grad_zero_atol": float(sparse_grad_zero_atol),
+        "k_deactivated_components": None,
+        "initialization_variants": init_variants,
+        "protocol": "k_deactivated_initialization_grid",
+    }
+
+    def _cbs(name: str) -> list[keras.callbacks.Callback]:
+        return build_training_callbacks(
+            ck,
+            name,
+            mode=callback_mode,
+            val_loss_threshold=val_loss_threshold,
+            patience=early_stopping_patience,
+            min_delta=early_stopping_min_delta,
+            restore_best_weights=early_stopping_restore_best_weights,
+        )
+
+    for b in bases:
+        arch_cls = ARCHITECTURE_BY_SLUG[b]
+        for k in ks:
+            variant = k_deactivated_variant_slug(b, k)
+            model = arch_cls.build(
+                input_shape,
+                kernel_size,
+                k_deactivated_components=k,
+            )
+            disp = arch_cls.display_name
+            print("\n" + "=" * 72)
+            print(f"Model — before training: {disp} — k_deact={k} ({variant})")
+            print("=" * 72)
+            model.summary()
+            callbacks = _cbs(variant)
+            history, val_mse = train_model(
+                model,
+                x_tr,
+                y_train,
+                x_va,
+                y_val,
+                name=variant,
+                ck_root=ck,
+                lr=lr,
+                epochs=epochs,
+                batch_size=batch_size,
+                verbose=verbose,
+                callbacks=callbacks,
+                update_rule=update_rule,
+                sparse_mask_min=sparse_mask_min,
+                sparse_mask_max=sparse_mask_max,
+                sparse_grad_zero_atol=sparse_grad_zero_atol,
+            )
+            pair_logger = next(
+                (cb for cb in callbacks if isinstance(cb, StructuringElementPairLoggerCallback)),
+                None,
+            )
+            results["histories"][variant] = history
+            results["models"][variant] = model
+            results["val_mse"][variant] = val_mse
+            if pair_logger is not None:
+                results["weight_pair_logs"][variant] = pair_logger.export_data()
+            print(f"\n--- After training: {disp} ({variant}) ---")
+            print(f"  Validation MSE: {val_mse:.6f}")
+
+    return results
+
+
 # %% [markdown]
 # ## 7–8. Analysis and plots
 #
@@ -1344,7 +1479,7 @@ def save_weight_pair_logs(suite: dict, out_dir: Path) -> list[Path]:
     models = suite.get("models") or {}
     logs_by_model = suite.get("weight_pair_logs") or {}
     for slug, model_logs in logs_by_model.items():
-        if slug != SingleSupErosionsArchitecture.slug:
+        if canonical_architecture_slug(slug) != SingleSupErosionsArchitecture.slug:
             continue
         model = models.get(slug)
         if model is None:
@@ -1386,8 +1521,8 @@ def plot_structuring_elements(
     weights: np.ndarray,
     kernel_shape: tuple[int, int] = (3, 3),
     n_show: int | None = None,
+    rows: int = 15,
     cols: int = 10,
-    filters_per_page: int | None = None,
     title: str = "Learned Structuring Elements",
     save_path: str | Path | None = None,
     show: bool = True,
@@ -1396,6 +1531,7 @@ def plot_structuring_elements(
     kernels = flat.T.reshape(-1, *kernel_shape)
     n_total = kernels.shape[0]
     n_show = min(n_show or n_total, n_total)
+    filters_per_page = rows * cols
     pages = _page_ranges(n_show, filters_per_page)
     saved: list[Path] = []
     vmin, vmax = -1.1, 1.1
@@ -1490,15 +1626,7 @@ def plot_pareto_elements(
     return saved
 
 
-_OVERLAY_COLORS = (
-    "#1f77b4",
-    "#ff7f0e",
-    "#2ca02c",
-    "#d62728",
-    "#9467bd",
-    "#8c564b",
-)
-
+_OVERLAY_COLORS = tuple(plt.get_cmap("tab20").colors)
 
 def _show_fig_if_interactive() -> None:
     import matplotlib
@@ -1746,12 +1874,9 @@ def plot_logged_weight_value_histograms(
     if not all_values:
         return []
 
-    lo = float(np.min(np.concatenate(all_values)))
-    hi = float(np.max(np.concatenate(all_values)))
-    if lo == hi:
-        lo -= 0.5
-        hi += 0.5
-    bin_edges = np.linspace(lo, hi, int(bins) + 1)
+    # Fixed horizontal range [-1, 1] for comparable plots across runs.
+    n_bins = int(bins)
+    bin_edges = np.linspace(-1.0, 1.0, n_bins + 1)
     bar_width = (bin_edges[1] - bin_edges[0]) * 0.92
     centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
@@ -1760,38 +1885,59 @@ def plot_logged_weight_value_histograms(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
     axes = np.asarray(axes)
 
+    from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
+
     for row_idx, layer_name in enumerate(valid_layers):
         for col_idx, snap_idx in enumerate(snapshot_indices):
             ax = axes[row_idx, col_idx]
             cell = grid[row_idx][col_idx]
+
             if cell is None:
                 ax.axis("off")
                 continue
+
             minimal_vals, rest_vals = cell
-            h_min, _ = np.histogram(minimal_vals, bins=bin_edges)
-            h_rest, _ = np.histogram(rest_vals, bins=bin_edges)
+
+            # --- MAIN HISTOGRAM (FULL RANGE) ---
+            all_vals = np.r_[minimal_vals, rest_vals]
+            xmin, xmax = np.min(all_vals), np.max(all_vals)
+
+            # dynamic bins for full range
+            h_min_full, edges_full = np.histogram(minimal_vals, bins=n_bins, range=(xmin, xmax))
+            h_rest_full, _ = np.histogram(rest_vals, bins=n_bins, range=(xmin, xmax))
+
+            centers_full = 0.5 * (edges_full[:-1] + edges_full[1:])
+            bar_width_full = (edges_full[1] - edges_full[0]) * 0.92
+
             ax.bar(
-                centers,
-                h_rest,
-                width=bar_width,
+                centers_full,
+                h_rest_full,
+                width=bar_width_full,
                 align="center",
                 color="blue",
                 alpha=0.55,
                 label="non-minimal",
             )
             ax.bar(
-                centers,
-                h_min,
-                width=bar_width,
+                centers_full,
+                h_min_full,
+                width=bar_width_full,
                 align="center",
                 color="red",
                 alpha=0.55,
                 label="Pareto minimal",
             )
+
+            # dynamic limits with margin
+            margin = 0.05 * (xmax - xmin + 1e-6)
+            ax.set_xlim(xmin - margin, xmax + margin)
+
+            # --- TITLES / LABELS ---
             epoch_value = int(epochs[snap_idx])
             epoch_label = "last" if snap_idx == len(epochs) - 1 else str(epoch_value)
             ax.set_title(f"epoch {epoch_label}", fontsize=8)
             ax.tick_params(axis="both", labelsize=7)
+
             if row_idx == n_rows - 1:
                 ax.set_xlabel("weight value", fontsize=8)
             if col_idx == 0:
@@ -1799,9 +1945,46 @@ def plot_logged_weight_value_histograms(
             if row_idx == 0 and col_idx == n_cols - 1:
                 ax.legend(fontsize=6, loc="upper right")
 
+            # --- INSET: centered zoom for the typical range [-1, 1] ---
+            has_outliers = (xmin < -1.0) or (xmax > 1.0)
+            if has_outliers:
+                axins = inset_axes(ax, width="46%", height="46%", loc="center")
+
+                h_min_zoom, _ = np.histogram(minimal_vals, bins=n_bins, range=(-1.0, 1.0))
+                h_rest_zoom, _ = np.histogram(rest_vals, bins=n_bins, range=(-1.0, 1.0))
+
+                axins.bar(
+                    centers,
+                    h_rest_zoom,
+                    width=bar_width,
+                    align="center",
+                    color="blue",
+                    alpha=0.55,
+                )
+                axins.bar(
+                    centers,
+                    h_min_zoom,
+                    width=bar_width,
+                    align="center",
+                    color="red",
+                    alpha=0.55,
+                )
+
+                axins.set_xlim(-1.0, 1.0)
+                # Use the combined envelope so the inset fully covers the visible zoomed bars.
+                ymax_zoom = max(
+                    float(np.max(h_min_zoom)),
+                    float(np.max(h_rest_zoom)),
+                    float(np.max(h_min_zoom + h_rest_zoom)),
+                )
+                axins.set_ylim(0.0, ymax_zoom * 1.12 if ymax_zoom > 0 else 1.0)
+                axins.set_title("zoom [-1, 1]", fontsize=6, pad=2)
+                axins.tick_params(axis="both", labelsize=6)
+                mark_inset(ax, axins, loc1=1, loc2=3, fc="none", ec="0.1")
+
     fig.suptitle(
         f"{experiment_label} — {model_slug} — weight histograms by epoch "
-        "(Pareto minimal vs non-minimal)",
+        "(Pareto minimal vs non-minimal; x in [-1, 1])",
         fontsize=11,
     )
     plt.tight_layout()
@@ -1911,11 +2094,15 @@ def plot_results_overlay(
     if title is None:
         title = "Validation loss" if mode_norm == "val" else "Train vs val loss"
     colors = _OVERLAY_COLORS
-    items = list(results["histories"].items())
+    histories = results.get("histories") or {}
+    items = list(histories.items())
+    if not items:
+        return
     if mode_norm == "val":
         fig, ax = plt.subplots(figsize=(9, 5))
         for i, (name, hist) in enumerate(items):
-            vl = hist.history.get("val_loss", [])
+            hist_dict = hist.history if hasattr(hist, "history") else hist
+            vl = hist_dict.get("val_loss", [])
             if not vl:
                 continue
             x = range(1, len(vl) + 1)
@@ -1933,8 +2120,9 @@ def plot_results_overlay(
         fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
         for i, (name, hist) in enumerate(items):
             c = colors[i % len(colors)]
-            loss = hist.history.get("loss", [])
-            vl = hist.history.get("val_loss", [])
+            hist_dict = hist.history if hasattr(hist, "history") else hist
+            loss = hist_dict.get("loss", [])
+            vl = hist_dict.get("val_loss", [])
             if log_scale:
                 if loss:
                     ax0.semilogy(
@@ -1977,10 +2165,11 @@ def save_per_model_curves(results: dict, out_dir: Path | None) -> None:
         return
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    for name, hist in results["histories"].items():
+    histories = results.get("histories") or {}
+    for name, hist in histories.items():
         model_dir = out_dir / name
         model_dir.mkdir(parents=True, exist_ok=True)
-        hdict = hist.history
+        hdict = hist.history if hasattr(hist, "history") else hist
         plot_training_curves_inline(
             hdict, model_dir / "loss.png", title=f"{name} — training", log_scale=False
         )
@@ -2066,11 +2255,11 @@ def plot_prediction_row(
     if n == 1:
         axes = np.expand_dims(axes, 0)
     for r in range(n):
-        axes[r, 0].imshow(x_va[r, :, :, 0], cmap="gray", vmin=0, vmax=1)
+        axes[r, 0].imshow(x_va[r, :, :, 0], cmap="bone", vmin=0, vmax=1)
         axes[r, 0].set_ylabel(f"#{r}", rotation=0, labelpad=12)
         vmin = float(np.min(y_val[r]))
         vmax = float(np.max(y_val[r]))
-        axes[r, 1].imshow(y_val[r, :, :, 0], cmap="gray", vmin=vmin, vmax=vmax)
+        axes[r, 1].imshow(y_val[r, :, :, 0], cmap="bone", vmin=vmin, vmax=vmax)
         if r == 0:
             axes[r, 0].set_title("Input")
             axes[r, 1].set_title("Target")
@@ -2079,7 +2268,7 @@ def plot_prediction_row(
             p = crop_pred_to_y(np.asarray(p), y_val[r : r + 1])
             span = max(vmax - vmin, 1e-6)
             axes[r, j + 2].imshow(
-                p[0, :, :, 0], cmap="gray", vmin=vmin - 0.05 * span, vmax=vmax + 0.05 * span
+                p[0, :, :, 0], cmap="bone", vmin=vmin - 0.05 * span, vmax=vmax + 0.05 * span
             )
             if r == 0:
                 axes[r, j + 2].set_title(name[:14], fontsize=8)
@@ -2131,10 +2320,10 @@ def plot_model_predictions_grid(
         span = max(vmax_gt - vmin_gt, 1e-6)
         vmin_p = vmin_gt - 0.05 * span
         vmax_p = vmax_gt + 0.05 * span
-        axes[r, 0].imshow(x_s[r, :, :, 0], cmap="gray", vmin=0, vmax=1)
-        axes[r, 1].imshow(y_s[r, :, :, 0], cmap="gray", vmin=vmin_gt, vmax=vmax_gt)
+        axes[r, 0].imshow(x_s[r, :, :, 0], cmap="bone", vmin=0, vmax=1)
+        axes[r, 1].imshow(y_s[r, :, :, 0], cmap="bone", vmin=vmin_gt, vmax=vmax_gt)
         for j, pred in enumerate(preds):
-            axes[r, 2 + j].imshow(pred[r, :, :, 0], cmap="gray", vmin=vmin_p, vmax=vmax_p)
+            axes[r, 2 + j].imshow(pred[r, :, :, 0], cmap="bone", vmin=vmin_p, vmax=vmax_p)
         if r == 0:
             for c in range(ncols):
                 axes[0, c].set_title(col_titles[c], fontsize=10)
@@ -2163,44 +2352,23 @@ def plot_combiner_pareto_pairs(
     if len(pairs) == 0:
         return []
     n = len(pairs)
-    x = pairs[:, 0]
-    y = pairs[:, 1]
-    x_min, x_max = float(np.min(x)), float(np.max(x))
-    y_min, y_max = float(np.min(y)), float(np.max(y))
-    x_span = max(x_max - x_min, 1e-6)
-    y_span = max(y_max - y_min, 1e-6)
-    x_pad = 0.08 * x_span
-    y_pad = 0.08 * y_span
-
-    fig, ax = plt.subplots(figsize=(7.2, 6.2))
-    ax.scatter(x, y, s=22, c="black", alpha=0.8, edgecolors="none")
-    ax.set_xlim(x_min - x_pad, x_max + x_pad)
-    ax.set_ylim(y_min - y_pad, y_max + y_pad)
-    ax.set_xlabel("w1")
-    ax.set_ylabel("w2")
-    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
-    ax.axhline(0.0, color="gray", linewidth=0.8, alpha=0.7)
-    ax.axvline(0.0, color="gray", linewidth=0.8, alpha=0.7)
-    ax.set_title(f"{title} — Pareto pairs (w1, w2) — n={n}", fontsize=12)
-
-    has_outside_zoom_region = bool(
-        np.any((x < -1.0) | (x > 1.0) | (y < -1.0) | (y > 1.0))
-    )
-    if has_outside_zoom_region:
-        inset = ax.inset_axes([0.60, 0.08, 0.35, 0.35])
-        inset.scatter(x, y, s=18, c="black", alpha=0.85, edgecolors="none")
-        inset.set_xlim(-1.0, 1.0)
-        inset.set_ylim(-1.0, 1.0)
-        inset.set_xticks([-1.0, 0.0, 1.0])
-        inset.set_yticks([-1.0, 0.0, 1.0])
-        inset.xaxis.set_ticks_position("bottom")
-        inset.yaxis.set_ticks_position("left")
-        inset.tick_params(axis="both", labelsize=8)
-        inset.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
-        inset.axhline(0.0, color="gray", linewidth=0.7, alpha=0.7)
-        inset.axvline(0.0, color="gray", linewidth=0.7, alpha=0.7)
-        ax.indicate_inset_zoom(inset, edgecolor="0.35", alpha=0.9)
-
+    cols = min(10, n)
+    rows = int(np.ceil(n / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(2 * cols, 2 * rows))
+    axes = np.atleast_2d(axes)
+    vmin, vmax = float(np.min(pairs)), float(np.max(pairs))
+    for i in range(rows * cols):
+        r, c = divmod(i, cols)
+        ax = axes[r, c]
+        if i < n:
+            bar = pairs[i].reshape(1, 2)
+            ax.imshow(bar, cmap="gray", aspect="auto", vmin=vmin, vmax=vmax)
+            for j in range(2):
+                val = pairs[i, j]
+                color = "blue" if val > 0 else "red"
+                ax.text(j, 0, f"{val:.2f}", ha="center", va="center", color=color, fontsize=8)
+        ax.axis("off")
+    plt.suptitle(f"{title} — Pareto pairs (w1, w2) — n={n}", fontsize=12)
     plt.tight_layout()
     saved: list[Path] = []
     if save_path is not None:
@@ -2230,17 +2398,16 @@ def plot_suite_structuring_elements(
     weight_pair_logs = suite.get("weight_pair_logs") or {}
 
     for slug, m in models.items():
+        canon = canonical_architecture_slug(slug)
         model_plots_dir = plots_dir / slug
         model_plots_dir.mkdir(parents=True, exist_ok=True)
-        if slug == SingleSupErosionsArchitecture.slug:
+        if canon == SingleSupErosionsArchitecture.slug:
             w = m.get_layer("Erosion").get_weights()[0]
             written.extend(
                 plot_structuring_elements(
                     w,
                     kernel_shape=(kh, kw),
                     n_show=min(64, N_EROSIONS_SINGLE),
-                    cols=5,
-                    filters_per_page=25,
                     title=f"{experiment_label} — {slug} — all structuring elements",
                     save_path=model_plots_dir / "all_kernels.png",
                     show=show,
@@ -2270,14 +2437,12 @@ def plot_suite_structuring_elements(
                 plot_pareto_elements(
                     pareto_w,
                     kernel_shape=(kh, kw),
-                    cols=5,
-                    filters_per_page=25,
                     title=f"{experiment_label} — {slug} — Pareto-minimal elements",
                     save_path=model_plots_dir / "pareto_kernels.png",
                     show=show,
                 )
             )
-        elif slug in (
+        elif canon in (
             TwoLayerSupErosionsArchitecture.slug,
             TwoLayerReceptiveFieldArchitecture.slug,
         ):
@@ -2288,8 +2453,6 @@ def plot_suite_structuring_elements(
                         w,
                         kernel_shape=(kh, kw),
                         n_show=min(64, w.shape[-1]),
-                        cols=5,
-                        filters_per_page=25,
                         title=f"{experiment_label} — {slug} — {layer_name} (all)",
                         save_path=model_plots_dir / f"{layer_name}_all.png",
                         show=show,
@@ -2300,8 +2463,6 @@ def plot_suite_structuring_elements(
                     plot_pareto_elements(
                         pareto_w,
                         kernel_shape=(kh, kw),
-                        cols=5,
-                        filters_per_page=25,
                         title=f"{experiment_label} — {slug} — {layer_name} (Pareto)",
                         save_path=model_plots_dir / f"{layer_name}_pareto.png",
                         show=show,
@@ -2347,19 +2508,26 @@ def run_comparison_plots(
     target_label: str,
     show: bool = True,
     n_pred_samples: int = 4,
+    training_overlay_slugs: Sequence[str] | None = None,
+    prediction_grid_slugs: Sequence[str] | None = None,
 ) -> list[Path]:
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
     comp = comparison_plot_slugs(suite)
+    overlay_slugs = (
+        list(training_overlay_slugs)
+        if training_overlay_slugs is not None
+        else comp
+    )
 
-    if comp:
+    if overlay_slugs:
         plot_training_curves_overlay(
             suite,
             log_scale=False,
             save_path=plots_dir / "four_pixel_three_way_overlay.png",
             target_label=target_label,
-            model_slugs=comp,
+            model_slugs=overlay_slugs,
         )
         saved.append(plots_dir / "four_pixel_three_way_overlay.png")
         plot_training_curves_overlay(
@@ -2367,7 +2535,7 @@ def run_comparison_plots(
             log_scale=True,
             save_path=plots_dir / "four_pixel_three_way_overlay_log.png",
             target_label=target_label,
-            model_slugs=comp,
+            model_slugs=overlay_slugs,
         )
         saved.append(plots_dir / "four_pixel_three_way_overlay_log.png")
 
@@ -2405,11 +2573,16 @@ def run_comparison_plots(
     saved.append(plots_dir / "train_val_overlay_log.png")
 
     save_per_model_curves(suite, plots_dir)
-    for name in suite["histories"]:
+    for name in (suite.get("histories") or {}):
         saved.append(plots_dir / name / "loss.png")
         saved.append(plots_dir / name / "loss_log.png")
 
-    if comp:
+    models = suite.get("models") or {}
+    grid_slugs_raw = (
+        list(prediction_grid_slugs) if prediction_grid_slugs is not None else comp
+    )
+    grid_slugs = [s for s in grid_slugs_raw if s in models]
+    if grid_slugs:
         plot_model_predictions_grid(
             pack,
             suite,
@@ -2417,18 +2590,19 @@ def run_comparison_plots(
             n_samples=n_pred_samples,
             save_path=plots_dir / "four_pixel_prediction_three_way.png",
             suptitle=f"{target_label}: input, target, predictions",
-            model_slugs=comp,
+            model_slugs=grid_slugs,
         )
         saved.append(plots_dir / "four_pixel_prediction_three_way.png")
 
-    plot_prediction_row(
-        pack,
-        suite,
-        y_val,
-        n_samples=min(3, len(y_val)),
-        save_path=plots_dir / "prediction_comparison_all_models.png",
-    )
-    saved.append(plots_dir / "prediction_comparison_all_models.png")
+    if models:
+        plot_prediction_row(
+            pack,
+            suite,
+            y_val,
+            n_samples=min(3, len(y_val)),
+            save_path=plots_dir / "prediction_comparison_all_models.png",
+        )
+        saved.append(plots_dir / "prediction_comparison_all_models.png")
 
     se_paths = plot_suite_structuring_elements(
         suite,
@@ -2506,7 +2680,9 @@ def build_experiment_metadata(
             "sparse_grad_zero_atol": suite.get(
                 "sparse_grad_zero_atol", SPARSE_GRAD_ZERO_ATOL
             ),
-            "k_deactivated_components": suite.get("k_deactivated_components", 0),
+            "k_deactivated_components": suite.get("k_deactivated_components"),
+            "initialization_variants": suite.get("initialization_variants"),
+            "suite_protocol": suite.get("protocol"),
         },
         "checkpoint_root": suite.get("checkpoint_root"),
         "val_mse": dict(suite["val_mse"]),
@@ -2793,72 +2969,278 @@ def run_k_deactivated_initialization_experiment(
     out_dir: Path | str | None = None,
     *,
     notebook: bool = False,
+    dated_subdir: bool = True,
+    k_values: Sequence[int] | None = None,
+    update_rule: str = TRAINING_UPDATE_RULE,
+    sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
+    sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
+    sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
 ) -> dict[str, Any]:
     """
-    Run 10 trainings total:
-    - SingleSupErosionsArchitecture with k in {0,1,2,3,4}
-    - TwoLayerSupErosionsArchitecture with k in {0,1,2,3,4}
-    where k=0 is the default random initialization.
+    Single experiment run (same layout as ``run_experiment``): one ``run_dir``,
+    data loaded once, then **10** trainings — each base architecture with
+    ``k_deactivated_components`` in ``{0,1,2,3,4}``. Model keys are
+    ``{base}__kd{k}`` (e.g. ``single_sup__kd0`` is normal init).
+
+    Combined plots (e.g. ``val_loss_overlay.png``) include **all** variants.
     """
+    import matplotlib
+
+    matplotlib.use("Agg")
+
     parent = Path(out_dir).expanduser()
     parent.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
-    root = parent / f"exp_{EXPERIMENT_TARGET_SLUG}_k_deactivated_{ts}"
-    root.mkdir(parents=True, exist_ok=True)
+    prefix = f"exp_{EXPERIMENT_TARGET_SLUG}_k_deactivated_grid"
+    if dated_subdir:
+        run_dir = new_dated_experiment_dir(parent, prefix)
+    else:
+        run_dir = parent
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "plots").mkdir(exist_ok=True)
+        (run_dir / "checkpoints").mkdir(exist_ok=True)
+
+    plots_dir = run_dir / "plots"
+    ck_root = run_dir / "checkpoints"
 
     arch_slugs = [
         SingleSupErosionsArchitecture.slug,
         TwoLayerSupErosionsArchitecture.slug,
     ]
-    k_values = [0, 1, 2, 3, 4]
-    runs: list[dict[str, Any]] = []
+    ks = [0, 1, 2, 3, 4] if k_values is None else [int(x) for x in k_values]
 
-    for arch_slug in arch_slugs:
-        for k in k_values:
-            tag = "normal_init" if k == 0 else f"k_deactivated_{k}"
-            run_dir = root / f"{arch_slug}__{tag}"
-            print(
-                f"\n{'=' * 72}\nRunning {arch_slug} with "
-                f"{'normal init' if k == 0 else f'k-deactivated init (k={k})'}\n{'=' * 72}"
-            )
-            suite = run_experiment(
-                out_dir=run_dir,
-                models_to_train=[arch_slug],
-                notebook=notebook,
-                dated_subdir=False,
-                k_deactivated_components=k,
-            )
-            runs.append(
-                {
-                    "architecture": arch_slug,
-                    "k_deactivated_components": k,
-                    "run_dir": str(run_dir.resolve()),
-                    "val_mse": {
-                        key: float(value) for key, value in suite.get("val_mse", {}).items()
-                    },
-                }
-            )
+    pack = load_fashion_mnist_four_pixel_pack(seed=DATA_LOAD_SEED)
+    y_train, y_val, _y_test, target_meta = compute_experiment_targets(pack)
+
+    print("Target:", target_meta["target_key"], "—", target_meta["target_label"])
+    print("K-deactivated grid: architectures", arch_slugs, "k_values", ks)
+    print("Shapes: x_train", pack["x_train"].shape, "y_train", y_train.shape)
+    print("Experiment run directory:", run_dir)
+
+    suite = train_and_eval_k_deactivated_variants_suite(
+        pack,
+        y_train,
+        y_val,
+        base_arch_slugs=arch_slugs,
+        k_values=ks,
+        epochs=EPOCHS_MAIN,
+        batch_size=BATCH_SIZE,
+        lr=LEARNING_RATE,
+        verbose=1,
+        checkpoint_root=ck_root,
+        update_rule=update_rule,
+        sparse_mask_min=sparse_mask_min,
+        sparse_mask_max=sparse_mask_max,
+        sparse_grad_zero_atol=sparse_grad_zero_atol,
+    )
+    suite["experiment_run_dir"] = str(run_dir.resolve())
+    variant_slugs = list(suite["models_to_train"])
+
+    weight_pair_log_files = save_weight_pair_logs(suite, run_dir / "weight_pair_logs")
+    suite["weight_pair_logs_dir"] = str((run_dir / "weight_pair_logs").resolve())
+    suite["weight_pair_log_files"] = [str(p.relative_to(run_dir)) for p in weight_pair_log_files]
+    write_metrics_and_metadata(run_dir, pack, suite, target_meta=target_meta)
+    run_comparison_plots(
+        suite,
+        pack,
+        y_val,
+        plots_dir,
+        target_label=target_meta["target_label"],
+        show=False,
+        n_pred_samples=min(4, len(y_val)),
+        training_overlay_slugs=variant_slugs,
+        prediction_grid_slugs=variant_slugs,
+    )
+    print_experiment_summary(run_dir, suite)
 
     summary = {
-        "protocol": "k_deactivated_initialization_grid",
+        "protocol": suite.get("protocol", "k_deactivated_initialization_grid"),
+        "run_dir": str(run_dir.resolve()),
         "architectures": arch_slugs,
-        "k_values": k_values,
-        "n_total_runs": len(runs),
-        "runs": runs,
+        "k_values": ks,
+        "variant_slugs": variant_slugs,
+        "val_mse": {k: float(v) for k, v in suite.get("val_mse", {}).items()},
     }
-    summary_path = root / "k_deactivated_summary.json"
+    summary_path = run_dir / "k_deactivated_summary.json"
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
 
-    print("\n" + "=" * 72)
-    print(f"K-deactivated experiment root: {root.resolve()}")
-    print(f"Summary: {summary_path.resolve()}")
-    print("=" * 72 + "\n")
+    if notebook:
+        try:
+            from IPython.display import Image, Markdown, display
+
+            display(Markdown(f"**K-deactivated run:** `{run_dir}`"))
+            display(Markdown(f"**Summary:** `{summary_path}`"))
+            display(Markdown(f"**Figures:** `{plots_dir}`"))
+            for p in sorted(plots_dir.glob("*.png")):
+                display(Image(filename=str(p)))
+        except ImportError:
+            pass
+
     return {
-        "root_dir": str(root.resolve()),
+        "suite": suite,
+        "run_dir": str(run_dir.resolve()),
         "summary_path": str(summary_path.resolve()),
         "summary": summary,
     }
+
+# %%
+def regenerate_experiment_plots(
+    run_dir: Path | str,
+    *,
+    show: bool = False,
+) -> None:
+    """
+    Regenerate all plots for an existing experiment directory.
+    Does NOT retrain models — only reloads logs + metadata.
+
+    Works for:
+    - single runs
+    - repeated runs (rep_00, rep_01, ...)
+    """
+
+    import json
+    import matplotlib
+    matplotlib.use("Agg")
+
+    run_dir = Path(run_dir).expanduser()
+    if not run_dir.exists():
+        raise FileNotFoundError(f"Run dir not found: {run_dir}")
+
+    print(f"Regenerating plots for: {run_dir}")
+
+    def _k_from_variant_slug(slug: str) -> int:
+        marker = "__kd"
+        if marker not in slug:
+            return 0
+        suffix = slug.split(marker)[-1]
+        try:
+            return int(suffix)
+        except ValueError:
+            return 0
+
+    def _build_model_from_slug(slug: str, input_shape: tuple[int, int, int]) -> keras.Model | None:
+        base = canonical_architecture_slug(slug)
+        arch_cls = ARCHITECTURE_BY_SLUG.get(base)
+        if arch_cls is None:
+            return None
+        k_deact = _k_from_variant_slug(slug)
+        return arch_cls.build(
+            input_shape=input_shape,
+            kernel_size=KERNEL_SIZE,
+            k_deactivated_components=k_deact,
+        )
+
+    def _load_weight_pair_logs(logs_dir: Path) -> dict[str, dict[str, Any]]:
+        by_model: dict[str, dict[str, Any]] = {}
+        if not logs_dir.exists():
+            return by_model
+        for log_file in sorted(logs_dir.glob("*_weight_pair_logs.npz")):
+            suffix = "_weight_pair_logs.npz"
+            stem = log_file.name[: -len(suffix)]
+            if "_" not in stem:
+                continue
+            slug, layer_name = stem.rsplit("_", 1)
+            data = np.load(log_file, allow_pickle=True)
+            model_logs = by_model.setdefault(
+                slug, {"epochs": np.asarray([], dtype=np.int32), "layers": {}, "weights_full": {}}
+            )
+            model_logs["epochs"] = np.asarray(data.get("epochs", []), dtype=np.int32)
+            layer_logs: dict[str, np.ndarray] = {}
+            for spec in STRUCTURING_ELEMENT_PAIR_SPECS:
+                key = spec["key"]
+                if key in data:
+                    layer_logs[key] = np.asarray(data[key], dtype=np.float32)
+            model_logs["layers"][layer_name] = layer_logs
+            if "weights_full" in data:
+                model_logs["weights_full"][layer_name] = np.asarray(data["weights_full"], dtype=np.float32)
+        return by_model
+
+    # --- helper to process one run ---
+    def _process_single_run(local_dir: Path):
+        print(f"\nProcessing: {local_dir}")
+
+        plots_dir = local_dir / "regenerate_plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- load metadata ---
+        metadata_path = local_dir / "metadata.json"
+        if not metadata_path.exists():
+            print(f"Skipping (no metadata): {local_dir}")
+            return
+
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+
+        suite = metadata.get("suite", metadata)  # fallback if structure differs
+        metrics_path = local_dir / "metrics.json"
+        if metrics_path.exists():
+            with open(metrics_path, "r") as f:
+                metrics = json.load(f)
+        else:
+            metrics = {}
+        if not suite.get("histories"):
+            suite["histories"] = metrics.get("histories", {})
+        if not suite.get("val_mse"):
+            suite["val_mse"] = metrics.get("val_mse", {})
+        suite.setdefault("models", {})
+
+        # --- reload dataset (needed for prediction plots) ---
+        pack = load_fashion_mnist_four_pixel_pack(seed=DATA_LOAD_SEED)
+        _, y_val, _y_test, target_meta = compute_experiment_targets(pack)
+        input_shape = (int(pack["H"]), int(pack["W"]), 1)
+
+        # --- rebuild model objects from checkpoints ---
+        candidate_slugs: list[str] = []
+        for slug in suite.get("histories", {}):
+            if slug not in candidate_slugs:
+                candidate_slugs.append(slug)
+        for slug in suite.get("val_mse", {}):
+            if slug not in candidate_slugs:
+                candidate_slugs.append(slug)
+        for slug in metadata.get("models_trained", []):
+            if slug not in candidate_slugs:
+                candidate_slugs.append(slug)
+        ck_root = local_dir / "checkpoints"
+        for slug in candidate_slugs:
+            model = _build_model_from_slug(slug, input_shape)
+            if model is None:
+                continue
+            loaded_best = load_best_weights_if_present(model, ck_root, slug)
+            if not loaded_best:
+                last_path = ck_root / slug / "last.weights.h5"
+                if last_path.is_file():
+                    model.load_weights(str(last_path))
+                    loaded_best = True
+            if loaded_best:
+                suite["models"][slug] = model
+
+        # --- load weight-pair logs in the same nested format used by plotting ---
+        suite["weight_pair_logs"] = _load_weight_pair_logs(local_dir / "weight_pair_logs")
+
+        # --- regenerate comparison plots ---
+        run_comparison_plots(
+            suite,
+            pack,
+            y_val,
+            plots_dir,
+            target_label=target_meta["target_label"],
+            show=show,
+            n_pred_samples=min(4, len(y_val)),
+        )
+
+        print(f"Done: {local_dir}")
+
+    # --- detect repeated runs ---
+    rep_dirs = sorted([p for p in run_dir.glob("rep_*") if p.is_dir()])
+
+    if rep_dirs:
+        print(f"Detected repeated experiment with {len(rep_dirs)} runs")
+        for rep_dir in rep_dirs:
+            _process_single_run(rep_dir)
+    else:
+        _process_single_run(run_dir)
+
+    print("\nAll plots regenerated.")
 
 
 # %%
@@ -2876,6 +3258,10 @@ def run_k_deactivated_initialization_experiment(
 #     main(notebook=False, dated_subdir=True)
 
 # %%
+from google.colab import drive
+drive.mount('/content/drive')
+
+# %%
 run_experiment(
         out_dir='/content/outputs', notebook=False, dated_subdir=True
     )
@@ -2888,28 +3274,8 @@ run_k_deactivated_initialization_experiment(
 # %%
 # !cp -r '/content/outputs/' '/content/drive/MyDrive/experiments-dima/outputs/'
 
-# %% [markdown]
-# ## 11. Execution (notebooks)
-#
-# Keep **one cell per full run** so outputs stay easy to find. Uncomment the call below when you are ready to
-# train; a blind **Run All** on the whole notebook will launch a long optimization pass.
-#
-# For **paper-style** variability statistics, uncomment **`run_experiment_repeated`** (or pass **`n_repetitions=...`**
-# to override **`N_TRAINING_REPETITIONS`** temporarily).
+# %%
+# !cp -r '/content/drive/MyDrive/experiments-dima/outputs/exp_four_pixel_average_k_deactivated_grid_2026-04-21_221420' '/content/outputs/'
 
-
-# %% [markdown]
-# ### Subset of models
-#
-# Pass **`models_to_train`** as a list of architecture **slugs** to skip the rest and shorten iteration during
-# debugging:
-#
-# ```python
-# suite_ab = run_experiment(
-#     notebook=True,
-#     models_to_train=[
-#         SingleSupErosionsArchitecture.slug,
-#         TwoLayerSupErosionsArchitecture.slug,
-#     ],
-# )
-# ```
+# %%
+regenerate_experiment_plots("/content/outputs/exp_four_pixel_average_k_deactivated_grid_2026-04-21_221420")
