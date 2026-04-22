@@ -770,6 +770,7 @@ STRUCTURING_ELEMENT_PAIR_SPECS: tuple[dict[str, Any], ...] = (
 )
 
 WEIGHT_PAIR_SNAPSHOT_EPOCHS: tuple[int, ...] = (0, 10, 50, 100, 500)
+MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE = 10
 
 
 def extract_structuring_element_pair_values(weights_5d: np.ndarray) -> dict[str, np.ndarray]:
@@ -1053,6 +1054,61 @@ class StructuringElementPairLoggerCallback(keras.callbacks.Callback):
         }
 
 
+class MinimalElementsLoggerCallback(keras.callbacks.Callback):
+    """Track count of Pareto-minimal elements across training epochs."""
+
+    def __init__(self, epoch_stride: int = MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE) -> None:
+        super().__init__()
+        self.epoch_stride = max(1, int(epoch_stride))
+        self.epochs: list[int] = []
+        self.total_counts: list[int] = []
+        self._per_layer_counts: dict[str, list[int]] = {}
+        self._last_epoch_seen = 0
+
+    def on_train_begin(self, logs=None) -> None:
+        del logs
+        self.epochs = []
+        self.total_counts = []
+        self._per_layer_counts = {}
+        self._last_epoch_seen = 0
+        self._snapshot(epoch=0)
+
+    def on_epoch_end(self, epoch, logs=None) -> None:
+        del logs
+        epoch_num = int(epoch) + 1
+        self._last_epoch_seen = epoch_num
+        if epoch_num % self.epoch_stride == 0:
+            self._snapshot(epoch=epoch_num)
+
+    def on_train_end(self, logs=None) -> None:
+        del logs
+        if self._last_epoch_seen not in self.epochs:
+            self._snapshot(epoch=self._last_epoch_seen)
+
+    def _snapshot(self, epoch: int) -> None:
+        self.epochs.append(int(epoch))
+        total_minimal = 0
+        for layer in iter_my_own_dilation_layers(self.model):
+            weights = np.asarray(layer.get_weights()[0], dtype=np.float32)
+            flat = weights[0, 0, 0, :, :]
+            pareto_mask = is_pareto_efficient(flat.T, return_mask=True)
+            n_minimal = int(np.sum(pareto_mask))
+            total_minimal += n_minimal
+            self._per_layer_counts.setdefault(layer.name, []).append(n_minimal)
+        self.total_counts.append(int(total_minimal))
+
+    def export_data(self) -> dict[str, Any]:
+        return {
+            "epochs": np.asarray(self.epochs, dtype=np.int32),
+            "total_minimal_elements": np.asarray(self.total_counts, dtype=np.int32),
+            "per_layer_minimal_elements": {
+                layer_name: np.asarray(values, dtype=np.int32)
+                for layer_name, values in self._per_layer_counts.items()
+            },
+            "epoch_stride": int(self.epoch_stride),
+        }
+
+
 # %% [markdown]
 # ### 6.3 Assembling the callback list
 #
@@ -1090,6 +1146,12 @@ def build_training_callbacks(
     restore_best_weights: bool = True,
 ) -> list[keras.callbacks.Callback]:
     cbs: list[keras.callbacks.Callback] = []
+    if canonical_architecture_slug(model_slug) in {
+        SingleSupErosionsArchitecture.slug,
+        TwoLayerSupErosionsArchitecture.slug,
+        TwoLayerReceptiveFieldArchitecture.slug,
+    }:
+        cbs.append(MinimalElementsLoggerCallback())
     if canonical_architecture_slug(model_slug) == SingleSupErosionsArchitecture.slug:
         cbs.append(StructuringElementPairLoggerCallback())
     if ck_root is not None:
@@ -1266,6 +1328,7 @@ def train_and_eval_suite(
         "val_mse": {},
         "models": {},
         "weight_pair_logs": {},
+        "minimal_elements_logs": {},
         "models_to_train": [c.slug for c in arch_list],
         "checkpoint_root": str(ck) if ck is not None else None,
         "update_rule": str(update_rule),
@@ -1321,11 +1384,17 @@ def train_and_eval_suite(
             (cb for cb in callbacks if isinstance(cb, StructuringElementPairLoggerCallback)),
             None,
         )
+        minimal_logger = next(
+            (cb for cb in callbacks if isinstance(cb, MinimalElementsLoggerCallback)),
+            None,
+        )
         results["histories"][slug] = history
         results["models"][slug] = model
         results["val_mse"][slug] = val_mse
         if pair_logger is not None:
             results["weight_pair_logs"][slug] = pair_logger.export_data()
+        if minimal_logger is not None:
+            results["minimal_elements_logs"][slug] = minimal_logger.export_data()
         print(f"\n--- After training: {disp} ({slug}) ---")
         print(f"  Validation MSE: {val_mse:.6f}")
 
@@ -1385,6 +1454,7 @@ def train_and_eval_k_deactivated_variants_suite(
         "val_mse": {},
         "models": {},
         "weight_pair_logs": {},
+        "minimal_elements_logs": {},
         "models_to_train": models_to_train,
         "checkpoint_root": str(ck) if ck is not None else None,
         "update_rule": str(update_rule),
@@ -1444,11 +1514,17 @@ def train_and_eval_k_deactivated_variants_suite(
                 (cb for cb in callbacks if isinstance(cb, StructuringElementPairLoggerCallback)),
                 None,
             )
+            minimal_logger = next(
+                (cb for cb in callbacks if isinstance(cb, MinimalElementsLoggerCallback)),
+                None,
+            )
             results["histories"][variant] = history
             results["models"][variant] = model
             results["val_mse"][variant] = val_mse
             if pair_logger is not None:
                 results["weight_pair_logs"][variant] = pair_logger.export_data()
+            if minimal_logger is not None:
+                results["minimal_elements_logs"][variant] = minimal_logger.export_data()
             print(f"\n--- After training: {disp} ({variant}) ---")
             print(f"  Validation MSE: {val_mse:.6f}")
 
@@ -1496,6 +1572,24 @@ def save_weight_pair_logs(suite: dict, out_dir: Path) -> list[Path]:
             np.savez_compressed(out_path, **payload)
             written.append(out_path)
     return written
+
+
+def minimal_elements_logs_to_json_safe(logs_by_model: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for slug, logs in (logs_by_model or {}).items():
+        epochs = np.asarray(logs.get("epochs", []), dtype=np.int32)
+        total = np.asarray(logs.get("total_minimal_elements", []), dtype=np.int32)
+        per_layer = logs.get("per_layer_minimal_elements") or {}
+        out[slug] = {
+            "epochs": [int(x) for x in epochs.tolist()],
+            "total_minimal_elements": [int(x) for x in total.tolist()],
+            "per_layer_minimal_elements": {
+                layer_name: [int(x) for x in np.asarray(vals, dtype=np.int32).tolist()]
+                for layer_name, vals in per_layer.items()
+            },
+            "epoch_stride": int(logs.get("epoch_stride", MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE)),
+        }
+    return out
 
 
 def _paginated_save_path(base: Path, n_pages: int, page_index: int) -> Path:
@@ -2240,6 +2334,85 @@ def plot_training_curves_overlay(
     plt.close(fig)
 
 
+def plot_minimal_elements_overlay(
+    results: dict,
+    *,
+    save_path: Path | None = None,
+    title: str | None = None,
+    model_slugs=None,
+    epoch_stride: int = MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE,
+) -> None:
+    logs_by_model = results.get("minimal_elements_logs") or {}
+    if not logs_by_model:
+        return
+    keys = list(model_slugs) if model_slugs is not None else list(PREFERRED_MODEL_ORDER)
+    keys += [k for k in logs_by_model.keys() if k not in keys]
+    stride = max(1, int(epoch_stride))
+    marker_cycle = ("o", "s", "^", "D", "v", "P", "X", "*", "<", ">")
+    colors = _OVERLAY_COLORS
+    fig, ax = plt.subplots(figsize=(6, 4))
+    plotted = False
+    for i, slug in enumerate(keys):
+        logs = logs_by_model.get(slug)
+        if not logs:
+            continue
+        epochs = np.asarray(logs.get("epochs", []), dtype=np.int32)
+        totals = np.asarray(logs.get("total_minimal_elements", []), dtype=np.int32)
+        if len(epochs) == 0 or len(totals) == 0:
+            continue
+        n = min(len(epochs), len(totals))
+        epochs = epochs[:n]
+        totals = totals[:n]
+        keep = (epochs % stride) == 0
+        keep[-1] = True
+        epochs_plot = epochs[keep]
+        totals_plot = totals[keep]
+
+        if len(epochs_plot) == 0:
+            continue
+        label = ARCHITECTURE_BY_SLUG[slug].display_name if slug in ARCHITECTURE_BY_SLUG else slug
+        ax.plot(
+            epochs_plot,
+            totals_plot,
+            color=colors[i % len(colors)],
+            marker=marker_cycle[i % len(marker_cycle)],
+            linewidth=1.5,
+            markersize=5,
+            label=label,
+        )
+        plotted = True
+    if not plotted:
+        plt.close(fig)
+        return
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Minimal Elements")
+    ax.set_title(title or "Minimal elements over training")
+    # put grid behind everything
+    ax.set_axisbelow(True)
+    # major grid (----)
+    ax.grid(
+        which="major",
+        linestyle="--",
+        linewidth=0.8,
+        alpha=0.6,
+    )
+    # minor ticks (needed for dotted grid)
+    ax.minorticks_on()
+    # minor grid (......)
+    ax.grid(
+        which="minor",
+        linestyle="--",
+        linewidth=0.5,
+        alpha=0.4,
+    )
+    ax.legend(loc="best", fontsize=9)
+    plt.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight", dpi=150)
+    # replace this:
+    _show_fig_if_interactive()
+    plt.close(fig)
+
 def plot_prediction_row(
     pack: dict,
     results: dict,
@@ -2538,6 +2711,14 @@ def run_comparison_plots(
             model_slugs=overlay_slugs,
         )
         saved.append(plots_dir / "four_pixel_three_way_overlay_log.png")
+        plot_minimal_elements_overlay(
+            suite,
+            save_path=plots_dir / "minimal_elements_overlay.png",
+            title=f"{target_label} — minimal elements over training",
+            model_slugs=overlay_slugs,
+            epoch_stride=MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE,
+        )
+        saved.append(plots_dir / "minimal_elements_overlay.png")
 
     plot_results_overlay(
         suite,
@@ -2703,6 +2884,9 @@ def write_metrics_and_metadata(
     metrics = {
         "val_mse": dict(suite["val_mse"]),
         "histories": histories_to_json_safe(suite["histories"]),
+        "minimal_elements_logs": minimal_elements_logs_to_json_safe(
+            suite.get("minimal_elements_logs", {})
+        ),
     }
     mp = run_dir / "metrics.json"
     with open(mp, "w") as f:
@@ -3272,10 +3456,10 @@ run_k_deactivated_initialization_experiment(
 )
 
 # %%
-# !cp -r '/content/outputs/' '/content/drive/MyDrive/experiments-dima/outputs/'
+# !cp -r '/content/outputs/exp_four_pixel_average_k_deactivated_grid_2026-04-21_221420/' '/content/drive/MyDrive/experiments-dima/'
 
 # %%
-# !cp -r '/content/drive/MyDrive/experiments-dima/outputs/exp_four_pixel_average_k_deactivated_grid_2026-04-21_221420' '/content/outputs/'
+# !cp -r '/content/drive/MyDrive/experiments-dima/outputs/exp_four_pixel_average_k_deactivated_grid_2026-04-21_221420' '/content/outputs/exp_four_pixel_average_k_deactivated_grid_2026-04-21_221420'
 
 # %%
 regenerate_experiment_plots("/content/outputs/exp_four_pixel_average_k_deactivated_grid_2026-04-21_221420")
