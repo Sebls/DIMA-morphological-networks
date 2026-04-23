@@ -61,9 +61,7 @@ from __future__ import annotations
 # - **Optimizer:** **Adam**, **`LEARNING_RATE`** $= 0.01$.
 # - **Training length:** Up to **2000** epochs (**`EPOCHS_MAIN`**), with early stopping when **val_loss** falls
 #   below $Q = 1/255^2$ (**`VAL_LOSS_EARLY_STOP_THRESHOLD`**, one gray-level scale on normalized inputs).
-# - **Gradient sparsity:** Set **`TRAINING_UPDATE_RULE`** to **`pareto`** (Pareto Update) or **`dense`**
-#   (Dense Update) to add the auxiliary sub-loss on inactive **`MyOwnDilation`** filters; pass **`update_rule=...`**
-#   into **`run_experiment`** / **`train_and_eval_suite`** to override the global without editing this file.
+# - **Training rule:** This notebook currently uses only the standard optimization step.
 #
 # **Varying initialization (paper vs this file)**
 #
@@ -97,7 +95,6 @@ from typing import Any
 import keras
 import matplotlib.pyplot as plt
 import numpy as np
-import tensorflow as tf
 from keras.datasets import fashion_mnist
 
 # %%
@@ -137,8 +134,7 @@ EARLY_STOPPING_PATIENCE: int = 25
 EARLY_STOPPING_MIN_DELTA: float = 1e-5
 EARLY_STOPPING_RESTORE_BEST_WEIGHTS: bool = True
 
-# ``standard`` — plain backprop. ``pareto`` / ``dense`` — Pareto Update (PU) and
-# Dense Update (DU): auxiliary sub-loss on filters with zero or inactive sup-erosion contribution.
+# ``standard`` — plain backprop.
 TRAINING_UPDATE_RULE: str = "standard"
 SPARSE_SUBMODEL_MASK_MIN: float = 10.0
 SPARSE_SUBMODEL_MASK_MAX: float = 10.0
@@ -785,182 +781,6 @@ def extract_structuring_element_pair_values(weights_5d: np.ndarray) -> dict[str,
     }
 
 
-def _pareto_redundant_filter_mask(weights_5d: np.ndarray) -> np.ndarray:
-    """Length-K mask: True iff filter is **not** on the coordinate-wise Pareto minimum front."""
-    flat = weights_5d[0, 0, 0, :, :]
-    minimal = is_pareto_efficient(flat.T, return_mask=True)
-    return ~minimal
-
-
-def _dense_zero_gradient_mask(
-    grad_5d: np.ndarray | None, *, atol: float
-) -> np.ndarray:
-    if grad_5d is None:
-        return np.zeros(0, dtype=bool)
-    g = grad_5d[0, 0, 0, :, :]
-    return np.max(np.abs(g), axis=0) <= atol
-
-
-def _gradient_for_dilation_layer(
-    layer: MyOwnDilation,
-    trainable_weights: list,
-    grads: list,
-):
-    for w, g in zip(trainable_weights, grads):
-        if w is layer.w:
-            return g
-    for w, g in zip(trainable_weights, grads):
-        if w.name == layer.w.name:
-            return g
-    return None
-
-
-def _apply_gradients_filtered(
-    optimizer: keras.optimizers.Optimizer, grads: list, variables: list
-) -> None:
-    pairs = [(g, v) for g, v in zip(grads, variables) if g is not None]
-    if pairs:
-        optimizer.apply_gradients(pairs)
-
-
-def train_model_sparse_pareto_dense(
-    model: keras.Model,
-    x_tr: np.ndarray,
-    y_tr: np.ndarray,
-    x_va: np.ndarray,
-    y_va: np.ndarray,
-    *,
-    name: str,
-    ck_root: Path | None,
-    lr: float,
-    epochs: int,
-    batch_size: int,
-    verbose: int,
-    callbacks: list[keras.callbacks.Callback],
-    mode: str,
-    mask_min: float,
-    mask_max: float,
-    grad_zero_atol: float,
-) -> tuple[Any, float]:
-    """Manual epoch loop: standard loss step, then per-``MyOwnDilation`` auxiliary MSE on masked filters."""
-    mode = mode.lower().strip()
-    if mode not in ("pareto", "dense"):
-        raise ValueError(f"mode must be 'pareto' or 'dense', got {mode!r}")
-
-    dil_layers = iter_my_own_dilation_layers(model)
-    if not dil_layers:
-        raise ValueError("Pareto/Dense updates require at least one MyOwnDilation layer.")
-
-    aux = keras.models.clone_model(model)
-    aux.set_weights(model.get_weights())
-
-    model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=lr),
-        loss=mse_crop_pred_to_true,
-    )
-    optimizer = model.optimizer
-
-    n_tr = int(len(x_tr))
-    steps_per_epoch = (n_tr + batch_size - 1) // batch_size
-    cb_list = keras.callbacks.CallbackList(
-        callbacks=callbacks,
-        add_history=True,
-        add_progbar=False,
-        model=model,
-        epochs=epochs,
-        verbose=verbose,
-        steps=steps_per_epoch,
-    )
-
-    model.stop_training = False
-    cb_list.on_train_begin()
-
-    for epoch in range(epochs):
-        if model.stop_training:
-            break
-        epoch_losses: list[float] = []
-        perm = np.random.permutation(n_tr)
-        for s in range(0, n_tr, batch_size):
-            idx = perm[s : s + batch_size]
-            xb = x_tr[idx]
-            yb = y_tr[idx]
-
-            with tf.GradientTape() as tape:
-                pred = model(xb, training=True)
-                loss = mse_crop_pred_to_true(yb, pred)
-            grads = tape.gradient(loss, model.trainable_weights)
-            _apply_gradients_filtered(optimizer, grads, model.trainable_weights)
-            loss_f = float(keras.ops.convert_to_numpy(loss))
-            epoch_losses.append(loss_f)
-
-            glist = grads if grads is not None else [None] * len(model.trainable_weights)
-
-            for dil in dil_layers:
-                w_np = np.asarray(dil.get_weights()[0], dtype=np.float32)
-                if mode == "pareto":
-                    update_list = _pareto_redundant_filter_mask(w_np)
-                else:
-                    g_t = _gradient_for_dilation_layer(
-                        dil, model.trainable_weights, glist
-                    )
-                    g_np = (
-                        None
-                        if g_t is None
-                        else np.asarray(keras.ops.convert_to_numpy(g_t), dtype=np.float32)
-                    )
-                    update_list = _dense_zero_gradient_mask(
-                        g_np, atol=grad_zero_atol
-                    )
-
-                if not np.any(update_list):
-                    continue
-
-                aux.set_weights(model.get_weights())
-                aux_layer = aux.get_layer(dil.name)
-                w_aux = np.random.uniform(
-                    mask_min, mask_max, size=w_np.shape
-                ).astype(np.float32)
-                w_aux[0, 0, 0, :, update_list] = w_np[0, 0, 0, :, update_list]
-                aux_layer.set_weights([w_aux])
-
-                with tf.GradientTape() as tape2:
-                    pred2 = aux(xb, training=True)
-                    loss2 = mse_crop_pred_to_true(yb, pred2)
-                grads2 = tape2.gradient(loss2, aux_layer.trainable_weights)
-                # Fresh optimizer each sub-step: Keras 3 binds an optimizer to the variables
-                # seen on first apply, and auxiliary steps touch different ``MyOwnDilation`` weights.
-                optimizer_aux = keras.optimizers.Adam(learning_rate=lr)
-                _apply_gradients_filtered(
-                    optimizer_aux, grads2, aux_layer.trainable_weights
-                )
-
-                w_upd = np.asarray(aux_layer.get_weights()[0], dtype=np.float32)
-                w_main = w_np.copy()
-                w_main[0, 0, 0, :, update_list] = w_upd[0, 0, 0, :, update_list]
-                dil.set_weights([w_main])
-
-        train_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
-        val_metrics = model.evaluate(
-            x_va, y_va, batch_size=batch_size, verbose=0, return_dict=True
-        )
-        val_loss = float(val_metrics["loss"])
-        logs = {"loss": train_loss, "val_loss": val_loss}
-        cb_list.on_epoch_end(epoch, logs)
-        if verbose:
-            print(
-                f"Epoch {epoch + 1}/{epochs} — loss: {train_loss:.6f} — "
-                f"val_loss: {val_loss:.6f}"
-            )
-
-    cb_list.on_train_end()
-
-    history = model.history
-    if ck_root is not None:
-        load_best_weights_if_present(model, ck_root, name)
-    val_mse = predict_mse(model, x_va, y_va)
-    return history, val_mse
-
-
 # %% [markdown]
 # ### 6.2 Custom callbacks
 #
@@ -1225,7 +1045,7 @@ def histories_to_json_safe(histories: dict) -> dict:
 # %% [markdown]
 # ### 6.5 Single model — compile and fit
 #
-# Change **optimizer**, **loss**, and **`fit`** kwargs here when experimenting with update rules or batching.
+# Change **optimizer**, **loss**, and **`fit`** kwargs here when experimenting with batching.
 
 # %%
 def train_model(
@@ -1248,24 +1068,9 @@ def train_model(
     sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
 ) -> tuple[Any, float]:
     ur = str(update_rule).lower().strip()
-    if ur in ("pareto", "dense"):
-        return train_model_sparse_pareto_dense(
-            model,
-            x_tr,
-            y_tr,
-            x_va,
-            y_va,
-            name=name,
-            ck_root=ck_root,
-            lr=lr,
-            epochs=epochs,
-            batch_size=batch_size,
-            verbose=verbose,
-            callbacks=callbacks,
-            mode=ur,
-            mask_min=sparse_mask_min,
-            mask_max=sparse_mask_max,
-            grad_zero_atol=sparse_grad_zero_atol,
+    if ur != "standard":
+        raise ValueError(
+            f"Unsupported update_rule={update_rule!r}; only 'standard' is enabled in this notebook."
         )
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=lr),
