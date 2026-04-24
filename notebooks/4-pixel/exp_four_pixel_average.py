@@ -773,6 +773,7 @@ STRUCTURING_ELEMENT_PAIR_SPECS: tuple[dict[str, Any], ...] = (
         "ylim": (-2.5, 1.0),
     },
 )
+INDEPENDENT_STRUCTURING_ELEMENT_PAIR_KEY = "cross_sum_vs_max_corners_center"
 
 WEIGHT_PAIR_SNAPSHOT_EPOCHS: tuple[int, ...] = (0, 10, 50, 100, 500)
 MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE = 10
@@ -1653,90 +1654,123 @@ def plot_logged_weight_pair_snapshot_grid(
     if not snapshot_indices:
         return []
 
-    n_rows = len(STRUCTURING_ELEMENT_PAIR_SPECS)
-    n_cols = len(snapshot_indices)
-    fig_w = max(2.9 * n_cols, 7.0)
-    fig_h = max(2.9 * n_rows, 5.5)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
-    axes = np.asarray(axes)
-    layer_weights = np.asarray(layer_weights, dtype=np.float32)
+    def _plot_specs_evolution(specs: Sequence[dict[str, Any]], save_path: Path, *, title_suffix: str) -> Path | None:
+        if not specs:
+            return None
+        n_rows = len(specs)
+        n_cols = len(snapshot_indices)
+        fig_w = max(2.9 * n_cols, 7.0)
+        fig_h = max(2.9 * n_rows, 5.5 if n_rows > 1 else 3.2)
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
+        axes = np.asarray(axes)
 
-    for col_idx, snap_idx in enumerate(snapshot_indices):
-        if snap_idx >= layer_weights.shape[0]:
-            continue
-        epoch_value = int(epochs[snap_idx])
-        epoch_label = "last" if snap_idx == len(epochs) - 1 else str(epoch_value)
-        pair_values_by_key = {
-            spec["key"]: np.asarray(layer_logs[spec["key"]][snap_idx], dtype=np.float32)
-            for spec in STRUCTURING_ELEMENT_PAIR_SPECS
-        }
-        pareto_mask = _pair_snapshot_pareto_mask(layer_weights[snap_idx])
-
-        for row_idx, spec in enumerate(STRUCTURING_ELEMENT_PAIR_SPECS):
-            ax = axes[row_idx, col_idx]
-            pairs = pair_values_by_key[spec["key"]]
-            if pairs.ndim != 2 or pairs.shape[-1] != 2 or pairs.shape[0] == 0:
-                ax.axis("off")
+        for col_idx, snap_idx in enumerate(snapshot_indices):
+            if snap_idx >= layer_weights.shape[0]:
                 continue
-            n_filters = pairs.shape[0]
-            mask = np.asarray(pareto_mask, dtype=bool)
-            if mask.shape != (n_filters,):
-                mask = np.zeros(n_filters, dtype=bool)
+            epoch_value = int(epochs[snap_idx])
+            epoch_label = "last" if snap_idx == len(epochs) - 1 else str(epoch_value)
+            pair_values_by_key = {
+                spec["key"]: np.asarray(layer_logs[spec["key"]][snap_idx], dtype=np.float32)
+                for spec in specs
+            }
+            pareto_mask = _pair_snapshot_pareto_mask(layer_weights[snap_idx])
 
-            ax.axhline(0.0, color="#d0d0d0", linewidth=0.8, zorder=0)
-            ax.axvline(0.0, color="#d0d0d0", linewidth=0.8, zorder=0)
-            ax.scatter(
-                pairs[~mask, 0],
-                pairs[~mask, 1],
-                color="blue",
-                s=10,
-                alpha=0.35,
-                zorder=1,
-                label="non-minimal",
-            )
-            ax.scatter(
-                pairs[mask, 0],
-                pairs[mask, 1],
-                color="red",
-                s=18,
-                alpha=0.9,
-                zorder=3,
-                label="Pareto minimal",
-            )
-            ax.scatter(
-                [spec["expected_point"][0]],
-                [spec["expected_point"][1]],
-                color="black",
-                marker="*",
-                s=100,
-                label=f"Expected {spec['expected_point']}",
-                zorder=4,
-            )
-            ax.grid(True, alpha=0.25)
-            ax.tick_params(axis="both", labelsize=7)
-            if row_idx == 0:
-                ax.set_title(f"epoch {epoch_label}", fontsize=8)
-            if col_idx == 0:
-                ax.set_ylabel(spec["ylabel"], fontsize=8)
-            if row_idx == n_rows - 1:
-                ax.set_xlabel(spec["xlabel"], fontsize=8)
-            if row_idx == 0 and col_idx == n_cols - 1:
-                ax.legend(fontsize=6, loc="upper right")
-            ax.set_xlim(*spec.get("xlim", (-1.0, 1.0)))
-            ax.set_ylim(*spec.get("ylim", (-1.0, 1.0)))
+            for row_idx, spec in enumerate(specs):
+                ax = axes[row_idx, col_idx]
+                pairs = pair_values_by_key[spec["key"]]
+                if pairs.ndim != 2 or pairs.shape[-1] != 2 or pairs.shape[0] == 0:
+                    ax.axis("off")
+                    continue
+                n_filters = pairs.shape[0]
+                mask = np.asarray(pareto_mask, dtype=bool)
+                if mask.shape != (n_filters,):
+                    mask = np.zeros(n_filters, dtype=bool)
 
-    fig.suptitle(
-        f"{experiment_label} — {layer_name} — structuring-element components evolution",
-        fontsize=11,
+                ax.axhline(0.0, color="#d0d0d0", linewidth=0.8, zorder=0)
+                ax.axvline(0.0, color="#d0d0d0", linewidth=0.8, zorder=0)
+                ax.scatter(
+                    pairs[~mask, 0],
+                    pairs[~mask, 1],
+                    color="blue",
+                    s=10,
+                    alpha=0.35,
+                    zorder=1,
+                    label="non-minimal",
+                )
+                ax.scatter(
+                    pairs[mask, 0],
+                    pairs[mask, 1],
+                    color="red",
+                    s=18,
+                    alpha=0.9,
+                    zorder=3,
+                    label="Pareto minimal",
+                )
+                ax.scatter(
+                    [spec["expected_point"][0]],
+                    [spec["expected_point"][1]],
+                    color="black",
+                    marker="*",
+                    s=100,
+                    label=f"Expected {spec['expected_point']}",
+                    zorder=4,
+                )
+                ax.grid(True, alpha=0.25)
+                ax.tick_params(axis="both", labelsize=7)
+                if row_idx == 0:
+                    ax.set_title(f"epoch {epoch_label}", fontsize=8)
+                if col_idx == 0:
+                    ax.set_ylabel(spec["ylabel"], fontsize=8)
+                if row_idx == n_rows - 1:
+                    ax.set_xlabel(spec["xlabel"], fontsize=8)
+                if row_idx == 0 and col_idx == n_cols - 1:
+                    ax.legend(fontsize=6, loc="upper right")
+                ax.set_xlim(*spec.get("xlim", (-1.0, 1.0)))
+                ax.set_ylim(*spec.get("ylim", (-1.0, 1.0)))
+
+        fig.suptitle(
+            f"{experiment_label} — {layer_name} — {title_suffix}",
+            fontsize=11,
+        )
+        plt.tight_layout()
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, bbox_inches="tight", dpi=150)
+        if show:
+            _show_fig_if_interactive()
+        plt.close(fig)
+        return save_path if save_path.exists() else None
+
+    layer_weights = np.asarray(layer_weights, dtype=np.float32)
+    main_specs = [
+        spec
+        for spec in STRUCTURING_ELEMENT_PAIR_SPECS
+        if spec["key"] != INDEPENDENT_STRUCTURING_ELEMENT_PAIR_KEY
+    ]
+    independent_specs = [
+        spec
+        for spec in STRUCTURING_ELEMENT_PAIR_SPECS
+        if spec["key"] == INDEPENDENT_STRUCTURING_ELEMENT_PAIR_KEY
+    ]
+
+    written: list[Path] = []
+    main_path = _plot_specs_evolution(
+        main_specs,
+        Path(model_plots_dir) / f"{layer_name}_pair_snapshot_evolution_grid.png",
+        title_suffix="structuring-element components evolution",
     )
-    plt.tight_layout()
-    save_path = Path(model_plots_dir) / f"{layer_name}_pair_snapshot_evolution_grid.png"
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, bbox_inches="tight", dpi=150)
-    if show:
-        _show_fig_if_interactive()
-    plt.close(fig)
-    return [save_path] if save_path.exists() else []
+    if main_path is not None:
+        written.append(main_path)
+
+    independent_path = _plot_specs_evolution(
+        independent_specs,
+        Path(model_plots_dir)
+        / f"{layer_name}_{INDEPENDENT_STRUCTURING_ELEMENT_PAIR_KEY}_evolution_row.png",
+        title_suffix=f"{INDEPENDENT_STRUCTURING_ELEMENT_PAIR_KEY} evolution",
+    )
+    if independent_path is not None:
+        written.append(independent_path)
+
+    return written
 
 
 def _pair_snapshot_pareto_mask(weights_5d: np.ndarray) -> np.ndarray:
