@@ -763,6 +763,15 @@ STRUCTURING_ELEMENT_PAIR_SPECS: tuple[dict[str, Any], ...] = (
         "ylabel": "W[0,1] + W[1,0] + W[1,2] + W[2,1]",
         "expected_point": (0.0, 0.0),
     },
+    {
+        "key": "cross_sum_vs_max_corners_center",
+        "title": "(W[0,1] + W[1,0] + W[1,2] + W[2,1], max{W[0,0],W[0,2],W[1,1],W[2,0],W[2,2]})",
+        "xlabel": "W[0,1] + W[1,0] + W[1,2] + W[2,1]",
+        "ylabel": "max{W[0,0], W[0,2], W[1,1], W[2,0], W[2,2]}",
+        "expected_point": (0.0, -2.0),
+        "xlim": (-1.0, 1.0),
+        "ylim": (-2.5, 1.0),
+    },
 )
 
 WEIGHT_PAIR_SNAPSHOT_EPOCHS: tuple[int, ...] = (0, 10, 50, 100, 500)
@@ -777,6 +786,15 @@ def extract_structuring_element_pair_values(weights_5d: np.ndarray) -> dict[str,
         "bottom_corners": np.column_stack([flat[6], flat[8]]).astype(np.float32),
         "center_vs_cross_sum": np.column_stack(
             [flat[4], flat[1] + flat[3] + flat[5] + flat[7]]
+        ).astype(np.float32),
+        "cross_sum_vs_max_corners_center": np.column_stack(
+            [
+                flat[1] + flat[3] + flat[5] + flat[7],
+                np.max(
+                    np.stack([flat[0], flat[2], flat[4], flat[6], flat[8]], axis=0),
+                    axis=0,
+                ),
+            ]
         ).astype(np.float32),
     }
 
@@ -1557,6 +1575,8 @@ def plot_structuring_element_pair_snapshot(
     epoch_label: str,
     save_path: Path | None = None,
     show: bool = True,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
 ) -> Path | None:
     pairs = np.asarray(pairs, dtype=np.float32)
     if pairs.ndim != 2 or pairs.shape[-1] != 2 or pairs.shape[0] == 0:
@@ -1594,8 +1614,8 @@ def plot_structuring_element_pair_snapshot(
         label=f"Expected point {expected_point}",
         zorder=5,
     )
-    ax.set_xlim(-1.0, 1.0)
-    ax.set_ylim(-1.0, 1.0)
+    ax.set_xlim(*(xlim if xlim is not None else (-1.0, 1.0)))
+    ax.set_ylim(*(ylim if ylim is not None else (-1.0, 1.0)))
     ax.set_title(f"{title} — epoch {epoch_label}")
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -1692,8 +1712,6 @@ def plot_logged_weight_pair_snapshot_grid(
                 label=f"Expected {spec['expected_point']}",
                 zorder=4,
             )
-            ax.set_xlim(-1.0, 1.0)
-            ax.set_ylim(-1.0, 1.0)
             ax.grid(True, alpha=0.25)
             ax.tick_params(axis="both", labelsize=7)
             if row_idx == 0:
@@ -1704,6 +1722,8 @@ def plot_logged_weight_pair_snapshot_grid(
                 ax.set_xlabel(spec["xlabel"], fontsize=8)
             if row_idx == 0 and col_idx == n_cols - 1:
                 ax.legend(fontsize=6, loc="upper right")
+            ax.set_xlim(*spec.get("xlim", (-1.0, 1.0)))
+            ax.set_ylim(*spec.get("ylim", (-1.0, 1.0)))
 
     fig.suptitle(
         f"{experiment_label} — {layer_name} — structuring-element components evolution",
@@ -1942,6 +1962,8 @@ def plot_logged_weight_pair_snapshots(
                 epoch_label=epoch_label,
                 save_path=save_path,
                 show=show,
+                xlim=spec.get("xlim"),
+                ylim=spec.get("ylim"),
             )
             if out is not None and Path(out).exists():
                 written.append(Path(out))
