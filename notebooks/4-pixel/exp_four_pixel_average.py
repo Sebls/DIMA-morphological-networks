@@ -205,9 +205,9 @@ def load_fashion_mnist_four_pixel_pack(
 # %% [markdown] id="5KEFBcgrdlCK"
 # The theoretical representation of this filter resembles to:
 #
-# [0, $r_1$, 0]
-# [$r_2$, 0, $r_3$]
-# [0, -$r_1$-$r_2$-$r_3$, 0]    
+# [-inf, $r_1$, -inf]
+# [$r_2$, -inf, $r_3$]
+# [-inf, -$r_1$-$r_2$-$r_3$, -inf]    
 # with $r_1,r_2,r_3 \in R$.
 
 
