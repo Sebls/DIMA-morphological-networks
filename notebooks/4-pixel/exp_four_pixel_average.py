@@ -102,7 +102,7 @@ RANDOM_SEED = 42
 keras.utils.set_random_seed(RANDOM_SEED)
 
 DATA_LOAD_SEED = RANDOM_SEED
-N_TRAINING_REPETITIONS = 3
+N_TRAINING_REPETITIONS = 10
 TRAINING_SEED_STEP = 10_000
 
 IMG_H, IMG_W = 28, 28
@@ -117,7 +117,7 @@ N_EROSIONS_TL1 = 500
 N_EROSIONS_TL2 = 500
 N_EROSIONS_TL3 = 700
 
-EPOCHS_MAIN = 2000
+EPOCHS_MAIN = 1000
 BATCH_SIZE = 50
 LEARNING_RATE = 0.01
 
@@ -129,7 +129,7 @@ INIT_MAX = INIT_CENTER + INIT_HALF_WIDTH
 QFACT = 255.0
 VAL_LOSS_EARLY_STOP_THRESHOLD = 1.0 / QFACT**2
 
-TRAINING_CALLBACK_MODE: str = "both"
+TRAINING_CALLBACK_MODE: str = "threshold"
 EARLY_STOPPING_PATIENCE: int = 25
 EARLY_STOPPING_MIN_DELTA: float = 1e-5
 EARLY_STOPPING_RESTORE_BEST_WEIGHTS: bool = True
@@ -2538,39 +2538,6 @@ def run_comparison_plots(
         )
         saved.append(plots_dir / "minimal_elements_overlay.png")
 
-    plot_results_overlay(
-        suite,
-        log_scale=False,
-        mode="val",
-        title="Validation loss — all models",
-        save_path=plots_dir / "val_loss_overlay.png",
-    )
-    saved.append(plots_dir / "val_loss_overlay.png")
-    plot_results_overlay(
-        suite,
-        log_scale=True,
-        mode="val",
-        title="Validation loss — all models (log)",
-        save_path=plots_dir / "val_loss_overlay_log.png",
-    )
-    saved.append(plots_dir / "val_loss_overlay_log.png")
-    plot_results_overlay(
-        suite,
-        log_scale=False,
-        mode="train_val",
-        title="Train / val — all models",
-        save_path=plots_dir / "train_val_overlay.png",
-    )
-    saved.append(plots_dir / "train_val_overlay.png")
-    plot_results_overlay(
-        suite,
-        log_scale=True,
-        mode="train_val",
-        title="Train / val — all models (log)",
-        save_path=plots_dir / "train_val_overlay_log.png",
-    )
-    saved.append(plots_dir / "train_val_overlay_log.png")
-
     save_per_model_curves(suite, plots_dir)
     for name in (suite.get("histories") or {}):
         saved.append(plots_dir / name / "loss.png")
@@ -2592,16 +2559,6 @@ def run_comparison_plots(
             model_slugs=grid_slugs,
         )
         saved.append(plots_dir / "four_pixel_prediction_three_way.png")
-
-    if models:
-        plot_prediction_row(
-            pack,
-            suite,
-            y_val,
-            n_samples=min(3, len(y_val)),
-            save_path=plots_dir / "prediction_comparison_all_models.png",
-        )
-        saved.append(plots_dir / "prediction_comparison_all_models.png")
 
     se_paths = plot_suite_structuring_elements(
         suite,
@@ -2699,16 +2656,20 @@ def write_metrics_and_metadata(
 ) -> tuple[Path, Path]:
     run_dir = Path(run_dir)
     meta = build_experiment_metadata(run_dir, pack, suite, target_meta=target_meta)
+    minimal_logs_json = minimal_elements_logs_to_json_safe(
+        suite.get("minimal_elements_logs", {})
+    )
     metrics = {
         "val_mse": dict(suite["val_mse"]),
         "histories": histories_to_json_safe(suite["histories"]),
-        "minimal_elements_logs": minimal_elements_logs_to_json_safe(
-            suite.get("minimal_elements_logs", {})
-        ),
+        "minimal_elements_logs": minimal_logs_json,
     }
     mp = run_dir / "metrics.json"
     with open(mp, "w") as f:
         json.dump(metrics, f, indent=2)
+    minimal_logs_path = run_dir / "minimal_elements_logs.json"
+    with open(minimal_logs_path, "w") as f:
+        json.dump(minimal_logs_json, f, indent=2)
     metap = run_dir / "metadata.json"
     with open(metap, "w") as f:
         json.dump(meta, f, indent=2)
@@ -3180,10 +3141,18 @@ def regenerate_experiment_plots(
                 metrics = json.load(f)
         else:
             metrics = {}
+        minimal_logs_path = local_dir / "minimal_elements_logs.json"
+        if minimal_logs_path.exists():
+            with open(minimal_logs_path, "r") as f:
+                minimal_logs = json.load(f)
+        else:
+            minimal_logs = metrics.get("minimal_elements_logs", {})
         if not suite.get("histories"):
             suite["histories"] = metrics.get("histories", {})
         if not suite.get("val_mse"):
             suite["val_mse"] = metrics.get("val_mse", {})
+        if not suite.get("minimal_elements_logs"):
+            suite["minimal_elements_logs"] = minimal_logs
         suite.setdefault("models", {})
 
         # --- reload dataset (needed for prediction plots) ---
@@ -3220,6 +3189,7 @@ def regenerate_experiment_plots(
         suite["weight_pair_logs"] = _load_weight_pair_logs(local_dir / "weight_pair_logs")
 
         # --- regenerate comparison plots ---
+        plot_slugs = [str(s) for s in metadata.get("models_trained", []) if str(s).strip()]
         run_comparison_plots(
             suite,
             pack,
@@ -3228,6 +3198,8 @@ def regenerate_experiment_plots(
             target_label=target_meta["target_label"],
             show=show,
             n_pred_samples=min(4, len(y_val)),
+            training_overlay_slugs=plot_slugs or None,
+            prediction_grid_slugs=plot_slugs or None,
         )
 
         print(f"Done: {local_dir}")
