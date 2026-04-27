@@ -1453,7 +1453,9 @@ def plot_structuring_elements(
         kernels = flat.T.reshape(-1, *kernel_shape)
     n_total = kernels.shape[0]
     n_show = min(n_show or n_total, n_total)
-    filters_per_page = rows * cols
+    page_rows = max(1, int(rows))
+    page_cols = max(1, int(cols))
+    filters_per_page = page_rows * page_cols
     pages = _page_ranges(n_show, filters_per_page)
     saved: list[Path] = []
     if pareto_front:
@@ -1462,11 +1464,17 @@ def plot_structuring_elements(
         vmin, vmax = -1.1, 1.1
     for page_idx, (start, end) in enumerate(pages):
         n_this = end - start
-        rows = (n_this + cols - 1) // cols
-        fig, axes = plt.subplots(rows, cols, figsize=(cols * 2, rows * 2))
+        n_rows_this_page = max(1, (n_this + page_cols - 1) // page_cols)
+        fig_w = max(2.2 * page_cols, 8.0)
+        fig_h = max(2.2 * n_rows_this_page, 5.0)
+        fig, axes = plt.subplots(
+            n_rows_this_page,
+            page_cols,
+            figsize=(fig_w, fig_h),
+        )
         axes = np.atleast_2d(axes)
         axes_flat = axes.flatten()
-        n_cells = rows * cols
+        n_cells = n_rows_this_page * page_cols
         for slot in range(n_this):
             global_i = start + slot
             ax = axes_flat[slot]
@@ -1486,8 +1494,8 @@ def plot_structuring_elements(
         page_title = title
         if len(pages) > 1:
             page_title = f"{title} — page {page_idx + 1} / {len(pages)}"
-        plt.suptitle(page_title, fontsize=14, y=1.00)
-        plt.tight_layout()
+        plt.suptitle(page_title, fontsize=14, y=0.995)
+        plt.tight_layout(rect=(0, 0, 1, 0.98))
         if save_path:
             out = _paginated_save_path(Path(save_path), len(pages), page_idx)
             plt.savefig(out, bbox_inches="tight", dpi=150)
@@ -1854,7 +1862,7 @@ def plot_logged_weight_value_histograms(
                 ax.legend(fontsize=6, loc="upper right")
 
             # --- INSET: centered zoom for the typical range [-1, 1] ---
-            has_outliers = (xmin < -1.0) or (xmax > 1.0)
+            has_outliers = (xmin < -.5) or (xmax > .5)
             if has_outliers:
                 axins = inset_axes(ax, width="46%", height="46%", loc="center")
 
