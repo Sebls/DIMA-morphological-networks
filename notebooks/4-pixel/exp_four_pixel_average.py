@@ -838,14 +838,18 @@ class SaveEpochWeightsCallback(keras.callbacks.Callback):
     def __init__(self, directory: str | Path, epoch_stride: int = WEIGHTS_SNAPSHOT_EPOCH_STRIDE) -> None:
         super().__init__()
         self.directory = Path(directory)
-        self.epoch_stride = max(1, int(epoch_stride))
+        self.epoch_stride = int(epoch_stride)
 
     def on_train_begin(self, logs=None) -> None:
         del logs
+        if self.epoch_stride <= 0:
+            return
         self.directory.mkdir(parents=True, exist_ok=True)
 
     def on_epoch_end(self, epoch, logs=None) -> None:
         del logs
+        if self.epoch_stride <= 0:
+            return
         epoch_num = int(epoch) + 1
         if epoch_num % self.epoch_stride != 0:
             return
@@ -1031,12 +1035,15 @@ def build_training_callbacks(
                     mode="min",
                     save_best_only=True,
                 ),
-                SaveEpochWeightsCallback(
-                    epoch_dir, epoch_stride=weights_snapshot_epoch_stride
-                ),
                 SaveLastWeightsCallback(last),
             ]
         )
+        if int(weights_snapshot_epoch_stride) > 0:
+            cbs.append(
+                SaveEpochWeightsCallback(
+                    epoch_dir, epoch_stride=weights_snapshot_epoch_stride
+                )
+            )
     m = mode.lower().strip()
     if m in ("threshold", "both") and val_loss_threshold is not None:
         cbs.append(
