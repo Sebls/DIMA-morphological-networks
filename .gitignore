@@ -96,3 +96,11 @@ tmp/
 /bibliography/
 
 /slides/
+scripts/
+notebooks/dataset/
+notebooks/outputs/
+
+*.ipynb
+/paper/
+/results/
+/outputs/
