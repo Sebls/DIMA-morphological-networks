@@ -102,13 +102,13 @@ RANDOM_SEED = 42
 keras.utils.set_random_seed(RANDOM_SEED)
 
 DATA_LOAD_SEED = RANDOM_SEED
-N_TRAINING_REPETITIONS = 10
+N_TRAINING_REPETITIONS = 1
 TRAINING_SEED_STEP = 10_000
 
 IMG_H, IMG_W = 28, 28
 KERNEL_SIZE: tuple[int, int] = (3, 3)
 
-DATASET_SIZE = 100
+DATASET_SIZE = 1000
 NOISE_SIGMA = 40.0
 USE_NOISE = True
 
@@ -133,6 +133,7 @@ TRAINING_CALLBACK_MODE: str = "threshold"
 EARLY_STOPPING_PATIENCE: int = 25
 EARLY_STOPPING_MIN_DELTA: float = 1e-5
 EARLY_STOPPING_RESTORE_BEST_WEIGHTS: bool = True
+WEIGHTS_SNAPSHOT_EPOCH_STRIDE: int = 1
 
 # ``standard`` — plain backprop.
 TRAINING_UPDATE_RULE: str = "standard"
@@ -831,6 +832,27 @@ class SaveLastWeightsCallback(keras.callbacks.Callback):
         self.model.save_weights(str(self.filepath))
 
 
+class SaveEpochWeightsCallback(keras.callbacks.Callback):
+    """Persist model weights every ``epoch_stride`` epochs."""
+
+    def __init__(self, directory: str | Path, epoch_stride: int = WEIGHTS_SNAPSHOT_EPOCH_STRIDE) -> None:
+        super().__init__()
+        self.directory = Path(directory)
+        self.epoch_stride = max(1, int(epoch_stride))
+
+    def on_train_begin(self, logs=None) -> None:
+        del logs
+        self.directory.mkdir(parents=True, exist_ok=True)
+
+    def on_epoch_end(self, epoch, logs=None) -> None:
+        del logs
+        epoch_num = int(epoch) + 1
+        if epoch_num % self.epoch_stride != 0:
+            return
+        filepath = self.directory / f"epoch_{epoch_num:04d}.weights.h5"
+        self.model.save_weights(str(filepath))
+
+
 class StructuringElementPairLoggerCallback(keras.callbacks.Callback):
     """Store sparse epoch snapshots of the requested 2D weight projections."""
 
@@ -983,6 +1005,7 @@ def build_training_callbacks(
     min_delta: float = 1e-5,
     patience_monitor: str = "val_loss",
     restore_best_weights: bool = True,
+    weights_snapshot_epoch_stride: int = WEIGHTS_SNAPSHOT_EPOCH_STRIDE,
 ) -> list[keras.callbacks.Callback]:
     cbs: list[keras.callbacks.Callback] = []
     if canonical_architecture_slug(model_slug) in {
@@ -998,6 +1021,7 @@ def build_training_callbacks(
         d.mkdir(parents=True, exist_ok=True)
         best = d / "best.weights.h5"
         last = d / "last.weights.h5"
+        epoch_dir = d / "epoch_snapshots"
         cbs.extend(
             [
                 keras.callbacks.ModelCheckpoint(
@@ -1006,6 +1030,9 @@ def build_training_callbacks(
                     monitor="val_loss",
                     mode="min",
                     save_best_only=True,
+                ),
+                SaveEpochWeightsCallback(
+                    epoch_dir, epoch_stride=weights_snapshot_epoch_stride
                 ),
                 SaveLastWeightsCallback(last),
             ]
@@ -1133,6 +1160,7 @@ def train_and_eval_suite(
     early_stopping_patience: int = EARLY_STOPPING_PATIENCE,
     early_stopping_min_delta: float = EARLY_STOPPING_MIN_DELTA,
     early_stopping_restore_best_weights: bool = EARLY_STOPPING_RESTORE_BEST_WEIGHTS,
+    weights_snapshot_epoch_stride: int = WEIGHTS_SNAPSHOT_EPOCH_STRIDE,
     update_rule: str = TRAINING_UPDATE_RULE,
     sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
     sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
@@ -1155,6 +1183,7 @@ def train_and_eval_suite(
         "minimal_elements_logs": {},
         "models_to_train": [c.slug for c in arch_list],
         "checkpoint_root": str(ck) if ck is not None else None,
+        "weights_snapshot_epoch_stride": int(weights_snapshot_epoch_stride),
         "update_rule": str(update_rule),
         "sparse_mask_min": float(sparse_mask_min),
         "sparse_mask_max": float(sparse_mask_max),
@@ -1171,6 +1200,7 @@ def train_and_eval_suite(
             patience=early_stopping_patience,
             min_delta=early_stopping_min_delta,
             restore_best_weights=early_stopping_restore_best_weights,
+            weights_snapshot_epoch_stride=weights_snapshot_epoch_stride,
         )
 
     for arch_cls in arch_list:
@@ -1243,6 +1273,7 @@ def train_and_eval_k_deactivated_variants_suite(
     early_stopping_patience: int = EARLY_STOPPING_PATIENCE,
     early_stopping_min_delta: float = EARLY_STOPPING_MIN_DELTA,
     early_stopping_restore_best_weights: bool = EARLY_STOPPING_RESTORE_BEST_WEIGHTS,
+    weights_snapshot_epoch_stride: int = WEIGHTS_SNAPSHOT_EPOCH_STRIDE,
     update_rule: str = TRAINING_UPDATE_RULE,
     sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
     sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
@@ -1281,6 +1312,7 @@ def train_and_eval_k_deactivated_variants_suite(
         "minimal_elements_logs": {},
         "models_to_train": models_to_train,
         "checkpoint_root": str(ck) if ck is not None else None,
+        "weights_snapshot_epoch_stride": int(weights_snapshot_epoch_stride),
         "update_rule": str(update_rule),
         "sparse_mask_min": float(sparse_mask_min),
         "sparse_mask_max": float(sparse_mask_max),
@@ -1299,6 +1331,7 @@ def train_and_eval_k_deactivated_variants_suite(
             patience=early_stopping_patience,
             min_delta=early_stopping_min_delta,
             restore_best_weights=early_stopping_restore_best_weights,
+            weights_snapshot_epoch_stride=weights_snapshot_epoch_stride,
         )
 
     for b in bases:
@@ -2632,6 +2665,9 @@ def build_experiment_metadata(
             "training_seed_step": TRAINING_SEED_STEP,
             "val_loss_threshold": VAL_LOSS_EARLY_STOP_THRESHOLD,
             "training_callback_mode": TRAINING_CALLBACK_MODE,
+            "weights_snapshot_epoch_stride": suite.get(
+                "weights_snapshot_epoch_stride", WEIGHTS_SNAPSHOT_EPOCH_STRIDE
+            ),
             "noise_sigma": NOISE_SIGMA,
             "dataset_size": DATASET_SIZE,
             "rf_block1_inactive": RF_BLOCK1_INACTIVE,
@@ -3040,6 +3076,164 @@ def run_k_deactivated_initialization_experiment(
             from IPython.display import Image, Markdown, display
 
             display(Markdown(f"**K-deactivated run:** `{run_dir}`"))
+            display(Markdown(f"**Summary:** `{summary_path}`"))
+            display(Markdown(f"**Figures:** `{plots_dir}`"))
+            for p in sorted(plots_dir.glob("*.png")):
+                display(Image(filename=str(p)))
+        except ImportError:
+            pass
+
+    return {
+        "suite": suite,
+        "run_dir": str(run_dir.resolve()),
+        "summary_path": str(summary_path.resolve()),
+        "summary": summary,
+    }
+
+
+# %%
+def run_snapshot_architecture_grid_experiment(
+    out_dir: Path | str | None = None,
+    *,
+    notebook: bool = False,
+    dated_subdir: bool = True,
+    dataset_size: int = DATASET_SIZE,
+    data_seed: int = DATA_LOAD_SEED,
+    training_seed: int = RANDOM_SEED,
+    weights_snapshot_epoch_stride: int = WEIGHTS_SNAPSHOT_EPOCH_STRIDE,
+    update_rule: str = TRAINING_UPDATE_RULE,
+    sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
+    sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
+    sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
+) -> dict[str, Any]:
+    """
+    Single snapshot-focused experiment run with:
+
+    - ``single_sup__kd0``
+    - ``two_layer_sup__kd0``, ``two_layer_sup__kd1``, ``two_layer_sup__kd2``, ``two_layer_sup__kd3``
+
+    The training uses periodic full-weight checkpoints and then renders the
+    complete plot suite at the end.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    parent = Path(out_dir).expanduser()
+    parent.mkdir(parents=True, exist_ok=True)
+    prefix = f"exp_{EXPERIMENT_TARGET_SLUG}_snapshot_architecture_grid"
+    if dated_subdir:
+        run_dir = new_dated_experiment_dir(parent, prefix)
+    else:
+        run_dir = parent
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "plots").mkdir(exist_ok=True)
+        (run_dir / "checkpoints").mkdir(exist_ok=True)
+
+    plots_dir = run_dir / "plots"
+    ck_root = run_dir / "checkpoints"
+    arch_k_grid: dict[str, list[int]] = {
+        SingleSupErosionsArchitecture.slug: [0],
+        TwoLayerSupErosionsArchitecture.slug: [0, 1, 2, 3],
+    }
+
+    if int(dataset_size) < 1:
+        raise ValueError("dataset_size must be >= 1")
+
+    keras.utils.set_random_seed(int(training_seed))
+    pack = load_fashion_mnist_four_pixel_pack(
+        dataset_size=int(dataset_size),
+        seed=int(data_seed),
+    )
+    y_train, y_val, _y_test, target_meta = compute_experiment_targets(pack)
+
+    print("Target:", target_meta["target_key"], "—", target_meta["target_label"])
+    print("Snapshot architecture grid:", arch_k_grid)
+    print("Dataset size:", int(dataset_size))
+    print("Training seed:", int(training_seed))
+    print("Weight snapshot epoch stride:", int(weights_snapshot_epoch_stride))
+    print("Shapes: x_train", pack["x_train"].shape, "y_train", y_train.shape)
+    print("Experiment run directory:", run_dir)
+
+    per_arch_suites: list[dict[str, Any]] = []
+    for arch_slug, arch_ks in arch_k_grid.items():
+        per_arch_suites.append(
+            train_and_eval_k_deactivated_variants_suite(
+                pack,
+                y_train,
+                y_val,
+                base_arch_slugs=[arch_slug],
+                k_values=arch_ks,
+                epochs=EPOCHS_MAIN,
+                batch_size=BATCH_SIZE,
+                lr=LEARNING_RATE,
+                verbose=1,
+                checkpoint_root=ck_root,
+                weights_snapshot_epoch_stride=weights_snapshot_epoch_stride,
+                update_rule=update_rule,
+                sparse_mask_min=sparse_mask_min,
+                sparse_mask_max=sparse_mask_max,
+                sparse_grad_zero_atol=sparse_grad_zero_atol,
+            )
+        )
+
+    suite = dict(per_arch_suites[0])
+    for extra_suite in per_arch_suites[1:]:
+        for key in (
+            "histories",
+            "val_mse",
+            "models",
+            "weight_pair_logs",
+            "minimal_elements_logs",
+        ):
+            suite[key].update(extra_suite[key])
+        suite["models_to_train"].extend(extra_suite["models_to_train"])
+        suite["initialization_variants"].extend(extra_suite["initialization_variants"])
+
+    suite["protocol"] = "snapshot_architecture_grid"
+    suite["experiment_run_dir"] = str(run_dir.resolve())
+    suite["training_seed"] = int(training_seed)
+    suite["weights_snapshot_epoch_stride"] = int(weights_snapshot_epoch_stride)
+    variant_slugs = list(suite["models_to_train"])
+
+    weight_pair_log_files = save_weight_pair_logs(suite, run_dir / "weight_pair_logs")
+    suite["weight_pair_logs_dir"] = str((run_dir / "weight_pair_logs").resolve())
+    suite["weight_pair_log_files"] = [str(p.relative_to(run_dir)) for p in weight_pair_log_files]
+    write_metrics_and_metadata(run_dir, pack, suite, target_meta=target_meta)
+    run_comparison_plots(
+        suite,
+        pack,
+        y_val,
+        plots_dir,
+        target_label=target_meta["target_label"],
+        show=False,
+        n_pred_samples=min(4, len(y_val)),
+        training_overlay_slugs=variant_slugs,
+        prediction_grid_slugs=variant_slugs,
+    )
+    print_experiment_summary(run_dir, suite)
+
+    summary = {
+        "protocol": suite["protocol"],
+        "run_dir": str(run_dir.resolve()),
+        "architectures": list(arch_k_grid.keys()),
+        "k_values_by_architecture": {k: list(v) for k, v in arch_k_grid.items()},
+        "variant_slugs": variant_slugs,
+        "dataset_size": int(dataset_size),
+        "data_seed": int(data_seed),
+        "training_seed": int(training_seed),
+        "weights_snapshot_epoch_stride": int(weights_snapshot_epoch_stride),
+        "val_mse": {k: float(v) for k, v in suite.get("val_mse", {}).items()},
+    }
+    summary_path = run_dir / "snapshot_architecture_grid_summary.json"
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    if notebook:
+        try:
+            from IPython.display import Image, Markdown, display
+
+            display(Markdown(f"**Snapshot grid run:** `{run_dir}`"))
             display(Markdown(f"**Summary:** `{summary_path}`"))
             display(Markdown(f"**Figures:** `{plots_dir}`"))
             for p in sorted(plots_dir.glob("*.png")):
