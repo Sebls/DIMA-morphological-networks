@@ -12,29 +12,180 @@
 #     name: python3
 # ---
 
-# %%
+# %% id="c29db5e7"
 from __future__ import annotations
 
-# %% [markdown]
+# %% [markdown] id="c4a31962"
 # # Four-pixel average — supremum-of-erosions experiments
 #
 # Learn the **4-pixel average** filter with trainable **sup**-erosion networks; ground truth comes from a fixed
 # conv layer.
 
-# %% [markdown]
+# %% [markdown] id="15f3dbe2"
 # ## 1. Mathematical background
 #
-# We supervise toward the **4-pixel average** (cross-shaped $3\times3$ stencil): same-padding convolution with
-# $0.25$ on the four orthogonal neighbors and zero at the center.
+# ### 1.1 Notation and image domain
 #
-# **Dilation** means, for each filter, the max over the patch of $(f + w)$ with learnable offsets $w$.
-# **Erosion** is the standard dual, $-(({-f}) \oplus w)$, then we take **sup** over filters.
+# Let $\mathbb{N}$, $\mathbb{Z}$ and $\mathbb{R}$ denote the sets of natural numbers (including $0$),
+# integers, and real numbers, respectively.
 #
-# Two-layer layouts use two parallel erosion banks and a **combiner** (per-filter minimum of the two shifted
-# maps, then maximum over filters). **Receptive-field** variants mask some patch weights to a large negative
-# constant so those stencil entries are effectively inactive.
+# Let
+# $$
+# \Omega = \{0,\ldots,H-1\} \times \{0,\ldots,W-1\} \subset \mathbb{Z}^2
+# $$
+# be the rectangular image grid. A grayscale image is a function
+# $$
+# f : \Omega \to \mathbb{R},
+# $$
+# represented in code as an array of shape $(H,W,1)$ with values normalized to $[0,1]$.
+#
+# A dataset is a finite family $\{f_n\}_{n=0}^{N-1}$ of such images, stored as a tensor of shape $(N,H,W,1)$.
+#
+# Let $K_h,K_w \in \mathbb{N}$ be the kernel dimensions and let
+# $$
+# W_k = \{0,\ldots,K_h-1\} \times \{0,\ldots,K_w-1\}
+# $$
+# denote the set of patch offsets. For $x \in \mathbb{Z}^2$, the patch extracted at location $x$ is
+# $\{f(x+y): y \in W_k\}$ when all required samples are defined.
+#
+# In this notebook the learnable morphological models use a $3\times3$ window, so $K_h=K_w=3$ and
+# $|W_k| = 9$.
+#
+# ### 1.2 Target operator: the four-pixel average
+#
+# Supervision is given by a fixed linear operator $T$ implemented as a single same-padded convolution.
+# Its kernel is
+# $$
+# a =
+# \begin{bmatrix}
+# 0 & 1/4 & 0 \\
+# 1/4 & 0 & 1/4 \\
+# 0 & 1/4 & 0
+# \end{bmatrix},
+# $$
+# so that for each $x \in \Omega$,
+# $$
+# T(f)(x) = \frac{1}{4}\Bigl(f(x+(-1,0)) + f(x+(0,-1)) + f(x+(0,1)) + f(x+(1,0))\Bigr),
+# $$
+# with zero-padding at the image boundary, exactly as in the fixed `Conv2D(..., padding="same")`
+# ground-truth model.
+#
+# ### 1.3 Morphological dilation and erosion maps
+#
+# For a filter index $m$, let $b_{m,y} \in \mathbb{R}$ be a learnable offset associated with patch position
+# $y \in W_k$. The dilation implemented by `MyOwnDilation` is
+# $$
+# \delta_m(f)(x) = \max_{y \in W_k} \bigl(f(x+y) + b_{m,y}\bigr).
+# $$
+#
+# The corresponding erosion is defined by grayscale duality:
+# $$
+# \varepsilon_m(f)(x)
+# = -\delta_m(-f)(x)
+# = -\max_{y \in W_k}\bigl(-f(x+y) + b_{m,y}\bigr)
+# = \min_{y \in W_k}\bigl(f(x+y) - b_{m,y}\bigr).
+# $$
+#
+# In the code, the input is first padded symmetrically with one pixel on each side, then a valid $3\times3$
+# patch extraction is applied. Hence the output has the same spatial size as the input while still using the
+# valid-window morphological formula above on the padded image.
+#
+# ### 1.4 Supremum-of-erosions operators
+#
+# Given $M$ erosion filters, the basic approximation family used in this notebook is the supremum of erosions
+# $$
+# \Phi(f)(x) = \max_{m \in \{1,\ldots,M\}} \varepsilon_m(f)(x).
+# $$
+#
+# This is the single-layer model class implemented by `SingleSupErosionsArchitecture`, with
+# $M = \texttt{N\_EROSIONS\_SINGLE}$.
+#
+# The intuition is that each filter defines one erosion-type hypothesis and the network keeps, at each pixel,
+# the largest response over the bank.
+#
+# ### 1.5 Two-stage aggregation architecture
+#
+# The two-layer family first builds two independent sup-erosion fields
+# $$
+# \Phi^{(1)}(f)(x) = \max_{i \in \{1,\ldots,M_1\}} \varepsilon^{(1)}_i(f)(x),
+# \qquad
+# \Phi^{(2)}(f)(x) = \max_{j \in \{1,\ldots,M_2\}} \varepsilon^{(2)}_j(f)(x),
+# $$
+# where $M_1=\texttt{N\_EROSIONS\_TL1}$ and $M_2=\texttt{N\_EROSIONS\_TL2}$.
+#
+# These two scalar feature maps are then combined by `SupErosions_block`. For each combiner filter
+# $m \in \{1,\ldots,M_3\}$, with scalar parameters $c^{(1)}_m,c^{(2)}_m \in \mathbb{R}$, define
+# $$
+# \Gamma_m(f)(x)
+# = \min\bigl(\Phi^{(1)}(f)(x) - c^{(1)}_m,\; \Phi^{(2)}(f)(x) - c^{(2)}_m\bigr).
+# $$
+# The final output is
+# $$
+# \Psi(f)(x) = \max_{m \in \{1,\ldots,M_3\}} \Gamma_m(f)(x),
+# $$
+# where $M_3=\texttt{N\_EROSIONS\_TL3}$.
+#
+# Thus the second stage is itself a supremum of two-input erosion-like maps. This defines the
+# `TwoLayerSupErosionsArchitecture`.
+#
+# ### 1.6 Receptive-field specialization masks
+#
+# The `TwoLayerReceptiveFieldArchitecture` has the same formula as the two-layer architecture above, but after
+# initialization some patch entries are forced to remain inactive in the first two banks.
+#
+# Concretely, if $I_1, I_2 \subset \{0,\ldots,|W_k|-1\}$ are fixed index sets, then for every filter in the first
+# bank we set
+# $$
+# b^{(1)}_{m,\ell} = \beta_{\mathrm{off}} \qquad \forall \ell \in I_1,
+# $$
+# and similarly for the second bank,
+# $$
+# b^{(2)}_{m,\ell} = \beta_{\mathrm{off}} \qquad \forall \ell \in I_2,
+# $$
+# where $\beta_{\mathrm{off}}$ is a large negative constant (`RF_INACTIVE_VALUE = -10.0` in the code).
+#
+# Because erosion uses $\min_y(f(x+y)-b_{m,y})$, setting $b_{m,y}$ to a large negative value makes
+# $f(x+y)-b_{m,y}$ very large, so that component is extremely unlikely to attain the minimum. In this sense,
+# the corresponding patch position is effectively removed from the structuring element.
+#
+# ### 1.7 Random $k$-deactivation of structuring-element entries
+#
+# Besides the fixed receptive-field masks, this notebook studies a random initialization variant called
+# **$k$-deactivation**.
+#
+# For each `MyOwnDilation` layer, each filter $m$, and a chosen integer
+# $k \in \{0,\ldots,|W_k|\}$, sample uniformly without replacement a subset
+# $$
+# S_m \subset \{0,\ldots,|W_k|-1\}, \qquad |S_m| = k.
+# $$
+# Then overwrite the corresponding filter components by
+# $$
+# b_{m,\ell} \leftarrow \beta_{\mathrm{off}} \qquad \forall \ell \in S_m,
+# $$
+# with $\beta_{\mathrm{off}} = -10.0$ (`inactive_value` in
+# `apply_k_deactivated_structuring_elements_init`).
+#
+# Therefore each structuring element starts with exactly $k$ inactive patch positions and $|W_k|-k$ active
+# positions. The case $k=0$ is the standard random initialization; larger $k$ values impose increasing sparsity
+# in the initial receptive support of each erosion filter.
+#
+# In the suite experiment, the same base architecture is trained for several values of $k$, producing variants
+# with slugs of the form `base_slug__kd{k}`.
+#
+# ### 1.8 Architecture family used in this notebook
+#
+# The experiment registry contains three canonical architecture classes:
+#
+# 1. `single_sup`: one bank of erosions followed by a supremum over filters.
+# 2. `two_layer_sup`: two parallel sup-erosion banks followed by a combiner
+#    $\max_m\min(\cdot,\cdot)$ stage.
+# 3. `two_layer_rf`: the same two-layer model, plus fixed receptive-field masks in the first two banks.
+#
+# All three architectures use the same padded $3\times3$ patch geometry, are trained with MSE against the
+# four-pixel-average target, and may optionally receive the random $k$-deactivation initialization described
+# above.
 
-# %% [markdown]
+# %% [markdown] id="aea5916c"
 # ### 1.5 Experimental protocol — From the paper *Optimizing Morphological Representations: Robustness to Initialization and Gradient Sparsity*
 #
 # The benchmark studies optimization in morphological layers: how **initialization** and **gradient sparsity**
@@ -76,7 +227,7 @@ from __future__ import annotations
 # 2. **Minimal structuring elements:** Count after **Pareto** reduction of learned filters (analysis and plots).
 
 
-# %% [markdown]
+# %% [markdown] id="7a25d797"
 # ## 2. Environment and setup
 #
 # This section pulls in dependencies and fixes the numeric knobs used everywhere else: image size, kernel shape,
@@ -85,7 +236,7 @@ from __future__ import annotations
 # **Keras** seed is set from **`RANDOM_SEED`** for a single full run; **`run_experiment_repeated`** resets it per
 # repetition so only initialization changes, not the noisy dataset.
 
-# %%
+# %% id="c8d9b1fe"
 import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -97,18 +248,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 from keras.datasets import fashion_mnist
 
-# %%
+# %% id="477659ac"
 RANDOM_SEED = 42
 keras.utils.set_random_seed(RANDOM_SEED)
 
 DATA_LOAD_SEED = RANDOM_SEED
-N_TRAINING_REPETITIONS = 10
+N_TRAINING_REPETITIONS = 3
 TRAINING_SEED_STEP = 10_000
 
 IMG_H, IMG_W = 28, 28
 KERNEL_SIZE: tuple[int, int] = (3, 3)
 
-DATASET_SIZE = 100
+DATASET_SIZE = 5000
 NOISE_SIGMA = 40.0
 USE_NOISE = True
 
@@ -117,7 +268,7 @@ N_EROSIONS_TL1 = 500
 N_EROSIONS_TL2 = 500
 N_EROSIONS_TL3 = 700
 
-EPOCHS_MAIN = 750
+EPOCHS_MAIN = 2000
 BATCH_SIZE = 50
 LEARNING_RATE = 0.01
 
@@ -130,8 +281,8 @@ QFACT = 255.0
 VAL_LOSS_EARLY_STOP_THRESHOLD = 1.0 / QFACT**2
 
 TRAINING_CALLBACK_MODE: str = "threshold"
-EARLY_STOPPING_PATIENCE: int = 25
-EARLY_STOPPING_MIN_DELTA: float = 1e-5
+EARLY_STOPPING_PATIENCE: int = 50
+EARLY_STOPPING_MIN_DELTA: float = 5e-6
 EARLY_STOPPING_RESTORE_BEST_WEIGHTS: bool = True
 
 # ``standard`` — plain backprop.
@@ -144,14 +295,14 @@ RF_BLOCK1_INACTIVE = [4, 5, 6, 7, 8]
 RF_BLOCK2_INACTIVE = [0, 1, 2, 3]
 RF_INACTIVE_VALUE = -10.0
 
-# %% [markdown]
+# %% [markdown] id="8905c789"
 # ## 3. Dataset
 #
 # We load **Fashion-MNIST**, take fixed-size train / validation / test slices, optionally add Gaussian noise on
 # the original $[0,255]$ pixel scale, then clip and convert to **NHWC** tensors in $[0,1]$. The pack also keeps
 # clean copies when noise is on, which is useful for side-by-side visualization.
 
-# %%
+# %% id="1514682f"
 def _add_gaussian_noise(x: np.ndarray, sigma: float, rng: np.random.Generator) -> np.ndarray:
     out = x.astype(np.float32) + rng.normal(0.0, sigma, size=x.shape).astype(np.float32)
     return np.clip(out, 0.0, 255.0)
@@ -196,29 +347,29 @@ def load_fashion_mnist_four_pixel_pack(
     }
 
 
-# %% [markdown]
+# %% [markdown] id="d298a98a"
 # ## 4. Targets
 #
 # Ground truth is one `Conv2D` with fixed **4-pixel average** weights, then `predict` on normalized inputs.
 # Below: **conv / model_gt**, stacked **Y** tensors, and helpers that bundle labels for training and metadata.
 
-# %% [markdown] id="5KEFBcgrdlCK"
+# %% [markdown] id="6b9e8923"
 # The theoretical representation of this filter resembles to:
 #
-# [-inf, $r_1$, -inf]
-# [$r_2$, -inf, $r_3$]
-# [-inf, -$r_1$-$r_2$-$r_3$, -inf]    
+# [0, $r_1$, 0]
+# [$r_2$, 0, $r_3$]
+# [0, -$r_1$-$r_2$-$r_3$, 0]    
 # with $r_1,r_2,r_3 \in R$.
 
 
-# %% [markdown]
+# %% [markdown] id="8109db0a"
 # ### 4.1 Ground truth — `model_gt` and 4-pixel average labels
 #
 # The stencil weights live in **`convolution_matrix`**; **`build_gt_conv_model`** wires them into a single
 # `Conv2D` with **same** padding and no bias. **`compute_targets_four_pixel_average`** runs **`predict`** on the
 # normalized inputs to produce **`y_train`**, **`y_val`**, and **`y_test`**.
 
-# %%
+# %% id="787768df"
 # In order to create the dataset for this task, we will use a model with a single convolutional layer and parameters :
 
 convolution_matrix = np.array(
@@ -254,14 +405,14 @@ def compute_targets_four_pixel_average(pack: dict) -> tuple[np.ndarray, np.ndarr
     return y_tr.astype(np.float32), y_va.astype(np.float32), y_te.astype(np.float32)
 
 
-# %% [markdown]
+# %% [markdown] id="c82ae7b6"
 # ### 4.2 Labels and experiment metadata
 #
 # **`EXPERIMENT_TARGET_SLUG`** names run directories; **`EXPERIMENT_TARGET_LABEL`** is the caption text for plots
 # and **`metadata.json`**. **`compute_experiment_targets`** calls **`compute_targets_four_pixel_average`** and
 # returns a small **meta** dict with tensor shapes plus those two strings.
 
-# %%
+# %% id="5d6b9f8b"
 EXPERIMENT_TARGET_SLUG = "four_pixel_average"
 
 EXPERIMENT_TARGET_LABEL = "4-pixel average output (cross conv, same padding)"
@@ -280,19 +431,19 @@ def compute_experiment_targets(
     return y_tr, y_va, y_te, meta
 
 
-# %% [markdown]
+# %% [markdown] id="62932291"
 # ## 5. Models
 #
 # **`MyOwnDilation`** (patch max + learnable offsets), a **combiner** block for two-branch layouts, then **three**
 # experiment architectures (single sup-erosions, two-layer, two-layer with receptive-field masks).
 
-# %% [markdown]
+# %% [markdown] id="bc5aa562"
 # ### 5.1 Implementing dilation layer with keras — `MyOwnDilation`
 #
 # For each spatial location and filter, the layer extracts a patch, adds a trainable offset vector **`w`**, and
 # takes the **maximum** over patch entries. That is the discrete max-plus analogue of grayscale dilation.
 
-# %%
+# %% id="68397261"
 class MyOwnDilation(keras.layers.Layer):
     def __init__(
         self,
@@ -356,13 +507,13 @@ class MyOwnDilation(keras.layers.Layer):
         return config
 
 
-# %% [markdown]
+# %% [markdown] id="d719ae55"
 # ### 5.2 Combiner block — `SupErosions_block` (two maps, then sup over filters)
 #
 # The block accepts two single-channel feature maps, subtracts one scalar weight per filter and branch, applies a
 # **per-filter minimum** (erosion-like), then a **maximum over filters** (supremum of those erosions).
 
-# %%
+# %% id="dfba3445"
 class SupErosions_block(keras.layers.Layer):
     def __init__(self, n_erosions, minval=-0.35, maxval=0.35, seed=None, **kwargs):
         super().__init__(**kwargs)
@@ -438,12 +589,12 @@ def apply_k_deactivated_structuring_elements_init(
         layer.set_weights([w])
 
 
-# %% [markdown]
+# %% [markdown] id="e0fa2597"
 # ### 5.3 One-layer SupErosions model
 #
 # One bank of erosions on the padded input, then **sup** over all filters into a single output channel.
 
-# %%
+# %% id="441cb3af"
 class SingleSupErosionsArchitecture:
     slug = "single_sup"
     display_name = "Single-layer supremum of erosions"
@@ -478,13 +629,13 @@ class SingleSupErosionsArchitecture:
         return model
 
 
-# %% [markdown]
+# %% [markdown] id="b2334697"
 # ### 5.4 Two parallel SupErosions banks + combiner
 #
 # Two independent erosion banks read the same padded map; each bank is reduced with **sup**, then
 # **`SupErosions_block`** merges the two scalar fields.
 
-# %%
+# %% id="1934930f"
 class TwoLayerSupErosionsArchitecture:
     slug = "two_layer_sup"
     display_name = "Two-layer sup-erosions (parallel banks + combiner)"
@@ -536,22 +687,127 @@ class TwoLayerSupErosionsArchitecture:
         return model
 
 
-# %% [markdown]
+# %% [markdown] id="6a0cfe99"
+# ### 5.5 Two-layer model with receptive-field specialization
+#
+# Same topology as the two-bank model in **5.4**, but after **`build`** we overwrite selected entries of the dilation weights so certain
+# patch positions in each bank stay inactive (large negative), nudging the two banks toward different stencils.
+
+# %% id="db6693a1"
+def _apply_receptive_field_masks(
+    model: keras.Model,
+    block1_inactive: list[int],
+    block2_inactive: list[int],
+    inactive_value: float,
+) -> None:
+    if block1_inactive:
+        layer = model.get_layer("Erosions1")
+        w = layer.get_weights()[0]
+        for idx in block1_inactive:
+            w[0, 0, 0, idx, :] = inactive_value
+        layer.set_weights([w])
+    if block2_inactive:
+        layer = model.get_layer("Erosions2")
+        w = layer.get_weights()[0]
+        for idx in block2_inactive:
+            w[0, 0, 0, idx, :] = inactive_value
+        layer.set_weights([w])
+
+
+class TwoLayerReceptiveFieldArchitecture:
+    slug = "two_layer_rf"
+    display_name = "Two-layer sup-erosions + receptive-field masks"
+
+    @classmethod
+    def build(
+        cls,
+        input_shape: tuple[int, int, int],
+        kernel_size: tuple[int, int],
+        *,
+        k_deactivated_components: int = 0,
+    ) -> keras.Model:
+        padding = (kernel_size[0] // 2, kernel_size[1] // 2)
+        input_im = keras.layers.Input(shape=input_shape, name="inputLayer")
+        input_padding = keras.layers.ZeroPadding2D(padding=padding)(input_im)
+        dil1 = MyOwnDilation(
+            filters=N_EROSIONS_TL1,
+            kernel_size=kernel_size,
+            stride=(1, 1),
+            padding="VALID",
+            minval=INIT_MIN,
+            maxval=INIT_MAX,
+            seed=RANDOM_SEED,
+            name="Erosions1",
+        )
+        out_erosions1 = -dil1(-input_padding)
+        sup_erosions1 = keras.ops.max(out_erosions1, axis=-1, keepdims=True)
+        dil2 = MyOwnDilation(
+            filters=N_EROSIONS_TL2,
+            kernel_size=kernel_size,
+            stride=(1, 1),
+            padding="VALID",
+            minval=INIT_MIN,
+            maxval=INIT_MAX,
+            seed=RANDOM_SEED,
+            name="Erosions2",
+        )
+        out_erosions2 = -dil2(-input_padding)
+        sup_erosions2 = keras.ops.max(out_erosions2, axis=-1, keepdims=True)
+        xout = SupErosions_block(
+            n_erosions=N_EROSIONS_TL3,
+            minval=INIT_MIN,
+            maxval=INIT_MAX,
+            seed=RANDOM_SEED,
+            name="SupErosions_3",
+        )([sup_erosions1, sup_erosions2])
+        model = keras.Model(input_im, xout, name=cls.slug)
+        model.build((None,) + input_shape)
+        apply_k_deactivated_structuring_elements_init(
+            model, k_deactivated_components=k_deactivated_components
+        )
+        _apply_receptive_field_masks(
+            model,
+            RF_BLOCK1_INACTIVE,
+            RF_BLOCK2_INACTIVE,
+            RF_INACTIVE_VALUE,
+        )
+        return model
+
+
+# %% [markdown] id="820706af"
 # ### 5.6 Default run order and helpers
 #
 # **`ALL_ARCHITECTURE_CLASSES`** fixes the canonical training order; **`ARCHITECTURE_BY_SLUG`** and
 # **`parse_models_to_train`** let you restrict or reorder runs by slug while keeping validation strict.
 # **`comparison_plot_slugs`** picks which trained models appear in combined figures.
 
-# %%
+# %% id="89d2d979"
 ALL_ARCHITECTURE_CLASSES: tuple[type, ...] = (
     SingleSupErosionsArchitecture,
     TwoLayerSupErosionsArchitecture,
+    TwoLayerReceptiveFieldArchitecture,
 )
 
 ARCHITECTURE_BY_SLUG: dict[str, type] = {c.slug: c for c in ALL_ARCHITECTURE_CLASSES}
 
 PREFERRED_MODEL_ORDER: tuple[str, ...] = tuple(c.slug for c in ALL_ARCHITECTURE_CLASSES)
+
+
+def parse_models_to_train(models: Sequence[str] | None) -> list[type]:
+    if models is None:
+        return list(ALL_ARCHITECTURE_CLASSES)
+    seen: set[str] = set()
+    out: list[type] = []
+    for s in models:
+        key = str(s).strip()
+        if key not in ARCHITECTURE_BY_SLUG:
+            raise ValueError(
+                f"Unknown model slug {key!r}. Use one of: {list(ARCHITECTURE_BY_SLUG.keys())}"
+            )
+        if key not in seen:
+            seen.add(key)
+            out.append(ARCHITECTURE_BY_SLUG[key])
+    return out
 
 
 def comparison_plot_slugs(suite: dict) -> list[str]:
@@ -573,20 +829,20 @@ def k_deactivated_variant_slug(base_slug: str, k: int) -> str:
     return f"{base_slug}__kd{int(k)}"
 
 
-# %% [markdown]
+# %% [markdown] id="9cd3ed9b"
 # ## 6. Training
 #
 # This section is split into cells so you can extend **losses**, **optimizers**, **callbacks**, and **training
 # loops** without scrolling through one huge block. Flow: metrics → custom callbacks → callback builders → run
 # paths / JSON → **`train_model`** → **`train_and_eval_suite`**.
 
-# %% [markdown]
+# %% [markdown] id="e90c1bf9"
 # ### 6.1 Metrics and prediction cropping
 #
 # **`mse_crop_pred_to_true`** is the compiled loss (graph mode); **`predict_mse`** / **`mse_np`** are for
 # post-training evaluation in NumPy.
 
-# %%
+# %% id="a2e4d432"
 def crop_pred_to_y(pred: np.ndarray, y_ref: np.ndarray) -> np.ndarray:
     _, hp, wp, _ = pred.shape
     ht, wt = y_ref.shape[1], y_ref.shape[2]
@@ -637,27 +893,27 @@ def iter_my_own_dilation_layers(model: keras.Model) -> list[MyOwnDilation]:
 
 
 STRUCTURING_ELEMENT_PAIR_SPECS: tuple[dict[str, Any], ...] = (
-    # {
-    #     "key": "top_corners",
-    #     "title": "(W[0,0], W[0,2])",
-    #     "xlabel": "W[0,0]",
-    #     "ylabel": "W[0,2]",
-    #     "expected_point": (0.0, 0.0),
-    # },
-    # {
-    #     "key": "bottom_corners",
-    #     "title": "(W[2,0], W[2,2])",
-    #     "xlabel": "W[2,0]",
-    #     "ylabel": "W[2,2]",
-    #     "expected_point": (0.0, 0.0),
-    # },
-    # {
-    #     "key": "center_vs_cross_sum",
-    #     "title": "(W[1,1], W[0,1] + W[1,0] + W[1,2] + W[2,1])",
-    #     "xlabel": "W[1,1]",
-    #     "ylabel": "W[0,1] + W[1,0] + W[1,2] + W[2,1]",
-    #     "expected_point": (0.0, 0.0),
-    # },
+    {
+        "key": "top_corners",
+        "title": "(W[0,0], W[0,2])",
+        "xlabel": "W[0,0]",
+        "ylabel": "W[0,2]",
+        "expected_point": (0.0, 0.0),
+    },
+    {
+        "key": "bottom_corners",
+        "title": "(W[2,0], W[2,2])",
+        "xlabel": "W[2,0]",
+        "ylabel": "W[2,2]",
+        "expected_point": (0.0, 0.0),
+    },
+    {
+        "key": "center_vs_cross_sum",
+        "title": "(W[1,1], W[0,1] + W[1,0] + W[1,2] + W[2,1])",
+        "xlabel": "W[1,1]",
+        "ylabel": "W[0,1] + W[1,0] + W[1,2] + W[2,1]",
+        "expected_point": (0.0, 0.0),
+    },
     {
         "key": "cross_sum_vs_max_corners_center",
         "title": "(W[0,1] + W[1,0] + W[1,2] + W[2,1], max{W[0,0],W[0,2],W[1,1],W[2,0],W[2,2]})",
@@ -668,21 +924,22 @@ STRUCTURING_ELEMENT_PAIR_SPECS: tuple[dict[str, Any], ...] = (
         "ylim": (-2.5, 1.0),
     },
 )
+
 INDEPENDENT_STRUCTURING_ELEMENT_PAIR_KEY = "cross_sum_vs_max_corners_center"
 
 WEIGHT_PAIR_SNAPSHOT_EPOCHS: tuple[int, ...] = (0, 10, 50, 100, 500)
-MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE = 25
+MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE = 10
 
 
 def extract_structuring_element_pair_values(weights_5d: np.ndarray) -> dict[str, np.ndarray]:
     """Project each 3x3 structuring element to the requested 2D pair views."""
     flat = np.asarray(weights_5d[0, 0, 0, :, :], dtype=np.float32)
     return {
-        # "top_corners": np.column_stack([flat[0], flat[2]]).astype(np.float32),
-        # "bottom_corners": np.column_stack([flat[6], flat[8]]).astype(np.float32),
-        # "center_vs_cross_sum": np.column_stack(
-        #     [flat[4], flat[1] + flat[3] + flat[5] + flat[7]]
-        # ).astype(np.float32),
+        "top_corners": np.column_stack([flat[0], flat[2]]).astype(np.float32),
+        "bottom_corners": np.column_stack([flat[6], flat[8]]).astype(np.float32),
+        "center_vs_cross_sum": np.column_stack(
+            [flat[4], flat[1] + flat[3] + flat[5] + flat[7]]
+        ).astype(np.float32),
         "cross_sum_vs_max_corners_center": np.column_stack(
             [
                 flat[1] + flat[3] + flat[5] + flat[7],
@@ -695,12 +952,12 @@ def extract_structuring_element_pair_values(weights_5d: np.ndarray) -> dict[str,
     }
 
 
-# %% [markdown]
+# %% [markdown] id="d753ea2f"
 # ### 6.2 Custom callbacks
 #
 # Add more **`keras.callbacks.Callback`** subclasses here (logging, LR schedules, custom early stops, etc.).
 
-# %%
+# %% id="7909634d"
 class EarlyStopThresholdCallback(keras.callbacks.Callback):
     def __init__(self, loss_threshold: float, monitor: str = "val_loss") -> None:
         super().__init__()
@@ -843,13 +1100,13 @@ class MinimalElementsLoggerCallback(keras.callbacks.Callback):
         }
 
 
-# %% [markdown]
+# %% [markdown] id="e5d6198e"
 # ### 6.3 Assembling the callback list
 #
 # **`build_training_callbacks`** is the single place that decides which callbacks each run gets; extend it when
 # you add new training strategies.
 
-# %%
+# %% id="338665b8"
 def make_early_stopping_patience_callback(
     patience: int = 25,
     min_delta: float = 1e-5,
@@ -883,6 +1140,7 @@ def build_training_callbacks(
     if canonical_architecture_slug(model_slug) in {
         SingleSupErosionsArchitecture.slug,
         TwoLayerSupErosionsArchitecture.slug,
+        TwoLayerReceptiveFieldArchitecture.slug,
     }:
         cbs.append(MinimalElementsLoggerCallback())
     if canonical_architecture_slug(model_slug) == SingleSupErosionsArchitecture.slug:
@@ -921,13 +1179,13 @@ def build_training_callbacks(
     return cbs
 
 
-# %% [markdown]
+# %% [markdown] id="05309c2b"
 # ### 6.4 Checkpoints, run folders, history export
 #
 # Weight reload and **`histories_to_json_safe`** stay separate from **`fit`** so you can reuse them from alternate
 # training entry points.
 
-# %%
+# %% id="e2a5f183"
 def load_best_weights_if_present(model: keras.Model, ck_root: Path, model_slug: str) -> bool:
     p = ck_root / model_slug / "best.weights.h5"
     if not p.is_file():
@@ -955,12 +1213,12 @@ def histories_to_json_safe(histories: dict) -> dict:
     return out
 
 
-# %% [markdown]
+# %% [markdown] id="6d9dd439"
 # ### 6.5 Single model — compile and fit
 #
 # Change **optimizer**, **loss**, and **`fit`** kwargs here when experimenting with batching.
 
-# %%
+# %% id="d458ceff"
 def train_model(
     model: keras.Model,
     x_tr: np.ndarray,
@@ -1004,12 +1262,121 @@ def train_model(
     return history, val_mse
 
 
-# %% [markdown]
+# %% [markdown] id="f4f8eaba"
 # ### 6.6 Suite — loop over architectures
 #
 # Orchestration only: build each model, attach callbacks, call **`train_model`**, collect histories and **val MSE**.
 
-# %%
+# %% id="44e0147b"
+def train_and_eval_suite(
+    pack: dict,
+    y_train: np.ndarray,
+    y_val: np.ndarray,
+    *,
+    models_to_train: Sequence[str] | None = None,
+    kernel_size: tuple[int, int] = KERNEL_SIZE,
+    epochs: int = EPOCHS_MAIN,
+    batch_size: int = BATCH_SIZE,
+    lr: float = LEARNING_RATE,
+    verbose: int = 1,
+    checkpoint_root: Path | None = None,
+    callback_mode: str = TRAINING_CALLBACK_MODE,
+    val_loss_threshold: float | None = VAL_LOSS_EARLY_STOP_THRESHOLD,
+    early_stopping_patience: int = EARLY_STOPPING_PATIENCE,
+    early_stopping_min_delta: float = EARLY_STOPPING_MIN_DELTA,
+    early_stopping_restore_best_weights: bool = EARLY_STOPPING_RESTORE_BEST_WEIGHTS,
+    update_rule: str = TRAINING_UPDATE_RULE,
+    sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
+    sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
+    sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
+    k_deactivated_components: int = 0,
+) -> dict:
+    h_in = int(pack["H"])
+    w_in = int(pack["W"])
+    x_tr = pack["x_train"]
+    x_va = pack["x_val"]
+    input_shape = (h_in, w_in, 1)
+    arch_list = parse_models_to_train(models_to_train)
+    ck = checkpoint_root
+    results: dict = {
+        "input_shape": input_shape,
+        "histories": {},
+        "val_mse": {},
+        "models": {},
+        "weight_pair_logs": {},
+        "minimal_elements_logs": {},
+        "models_to_train": [c.slug for c in arch_list],
+        "checkpoint_root": str(ck) if ck is not None else None,
+        "update_rule": str(update_rule),
+        "sparse_mask_min": float(sparse_mask_min),
+        "sparse_mask_max": float(sparse_mask_max),
+        "sparse_grad_zero_atol": float(sparse_grad_zero_atol),
+        "k_deactivated_components": int(k_deactivated_components),
+    }
+
+    def _cbs(name: str) -> list[keras.callbacks.Callback]:
+        return build_training_callbacks(
+            ck,
+            name,
+            mode=callback_mode,
+            val_loss_threshold=val_loss_threshold,
+            patience=early_stopping_patience,
+            min_delta=early_stopping_min_delta,
+            restore_best_weights=early_stopping_restore_best_weights,
+        )
+
+    for arch_cls in arch_list:
+        slug = arch_cls.slug
+        model = arch_cls.build(
+            input_shape,
+            kernel_size,
+            k_deactivated_components=k_deactivated_components,
+        )
+        disp = arch_cls.display_name
+        print("\n" + "=" * 72)
+        print(f"Model — before training: {disp} ({slug})")
+        print("=" * 72)
+        model.summary()
+        callbacks = _cbs(slug)
+        history, val_mse = train_model(
+            model,
+            x_tr,
+            y_train,
+            x_va,
+            y_val,
+            name=slug,
+            ck_root=ck,
+            lr=lr,
+            epochs=epochs,
+            batch_size=batch_size,
+            verbose=verbose,
+            callbacks=callbacks,
+            update_rule=update_rule,
+            sparse_mask_min=sparse_mask_min,
+            sparse_mask_max=sparse_mask_max,
+            sparse_grad_zero_atol=sparse_grad_zero_atol,
+        )
+        pair_logger = next(
+            (cb for cb in callbacks if isinstance(cb, StructuringElementPairLoggerCallback)),
+            None,
+        )
+        minimal_logger = next(
+            (cb for cb in callbacks if isinstance(cb, MinimalElementsLoggerCallback)),
+            None,
+        )
+        results["histories"][slug] = history
+        results["models"][slug] = model
+        results["val_mse"][slug] = val_mse
+        if pair_logger is not None:
+            results["weight_pair_logs"][slug] = pair_logger.export_data()
+        if minimal_logger is not None:
+            results["minimal_elements_logs"][slug] = minimal_logger.export_data()
+        print(f"\n--- After training: {disp} ({slug}) ---")
+        print(f"  Validation MSE: {val_mse:.6f}")
+
+    return results
+
+
 def train_and_eval_k_deactivated_variants_suite(
     pack: dict,
     y_train: np.ndarray,
@@ -1140,7 +1507,7 @@ def train_and_eval_k_deactivated_variants_suite(
     return results
 
 
-# %% [markdown]
+# %% [markdown] id="867b0a5c"
 # ## 7–8. Analysis and plots
 #
 # After training we summarize **learning curves**, **prediction** panels against ground truth, and
@@ -1148,7 +1515,7 @@ def train_and_eval_k_deactivated_variants_suite(
 # on the flattened stencil); large filter banks are split across **paginated** PNGs when needed. Everything below
 # uses **NumPy**, **Matplotlib**, and **Keras** only.
 
-# %%
+# %% id="82994a02"
 def extract_pareto_filters(weights: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """From weights (1,1,1,patch_size,n_filters) return (pareto_filters, mask)."""
     flat = weights[0, 0, 0, :, :]
@@ -1223,43 +1590,28 @@ def _page_ranges(n_items: int, filters_per_page: int | None) -> list[tuple[int, 
 def plot_structuring_elements(
     weights: np.ndarray,
     kernel_shape: tuple[int, int] = (3, 3),
-    pareto_front: bool = False,
     n_show: int | None = None,
-    rows: int = 35,
-    cols: int = 25,
+    rows: int = 15,
+    cols: int = 10,
     title: str = "Learned Structuring Elements",
     save_path: str | Path | None = None,
     show: bool = True,
 ) -> list[Path]:
-    if pareto_front:
-        kernels = np.asarray(weights).T.reshape(-1, *kernel_shape)
-    else:
-        flat = np.asarray(weights)[0, 0, 0, :, :]
-        kernels = flat.T.reshape(-1, *kernel_shape)
+    flat = weights[0, 0, 0, :, :]
+    kernels = flat.T.reshape(-1, *kernel_shape)
     n_total = kernels.shape[0]
     n_show = min(n_show or n_total, n_total)
-    page_rows = max(1, int(rows))
-    page_cols = max(1, int(cols))
-    filters_per_page = page_rows * page_cols
+    filters_per_page = rows * cols
     pages = _page_ranges(n_show, filters_per_page)
     saved: list[Path] = []
-    if pareto_front:
-        vmin, vmax = float(np.min(kernels)), float(np.max(kernels))
-    else:
-        vmin, vmax = -1.1, 1.1
+    vmin, vmax = -1.1, 1.1
     for page_idx, (start, end) in enumerate(pages):
         n_this = end - start
-        n_rows_this_page = max(1, (n_this + page_cols - 1) // page_cols)
-        fig_w = max(2.2 * page_cols, 8.0)
-        fig_h = max(2.2 * n_rows_this_page, 5.0)
-        fig, axes = plt.subplots(
-            n_rows_this_page,
-            page_cols,
-            figsize=(fig_w, fig_h),
-        )
+        rows = (n_this + cols - 1) // cols
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 2, rows * 2))
         axes = np.atleast_2d(axes)
         axes_flat = axes.flatten()
-        n_cells = n_rows_this_page * page_cols
+        n_cells = rows * cols
         for slot in range(n_this):
             global_i = start + slot
             ax = axes_flat[slot]
@@ -1279,8 +1631,60 @@ def plot_structuring_elements(
         page_title = title
         if len(pages) > 1:
             page_title = f"{title} — page {page_idx + 1} / {len(pages)}"
-        plt.suptitle(page_title, fontsize=14, y=0.995)
-        plt.tight_layout(rect=(0, 0, 1, 0.98))
+        plt.suptitle(page_title, fontsize=14, y=1.00)
+        plt.tight_layout()
+        if save_path:
+            out = _paginated_save_path(Path(save_path), len(pages), page_idx)
+            plt.savefig(out, bbox_inches="tight", dpi=150)
+            saved.append(out)
+        if show:
+            plt.show()
+        else:
+            plt.close()
+    return saved
+
+
+def plot_pareto_elements(
+    filters: np.ndarray,
+    kernel_shape: tuple[int, int] = (3, 3),
+    cols: int = 10,
+    filters_per_page: int | None = None,
+    title: str = "Minimal Structuring Elements",
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> list[Path]:
+    n_filters = filters.shape[1]
+    kernels = filters.T.reshape(-1, *kernel_shape)
+    pages = _page_ranges(n_filters, filters_per_page)
+    saved: list[Path] = []
+    vmin, vmax = float(np.min(filters)), float(np.max(filters))
+    for page_idx, (start, end) in enumerate(pages):
+        n_this = end - start
+        rows = (n_this + cols - 1) // cols
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 2, rows * 2))
+        axes = np.atleast_2d(axes)
+        axes_flat = axes.flatten()
+        n_cells = rows * cols
+        for slot in range(n_this):
+            i = start + slot
+            ax = axes_flat[slot]
+            k = kernels[i]
+            ax.imshow(k, cmap="gray", interpolation="nearest", vmin=vmin, vmax=vmax)
+            for r in range(kernel_shape[0]):
+                for c in range(kernel_shape[1]):
+                    val = k[r, c]
+                    color = "blue" if val > 0 else "red"
+                    ax.text(
+                        c, r, f"{val:.2f}", ha="center", va="center", color=color, fontsize=8
+                    )
+            ax.axis("off")
+        for j in range(n_this, n_cells):
+            axes_flat[j].axis("off")
+        page_title = title
+        if len(pages) > 1:
+            page_title = f"{title} — page {page_idx + 1} / {len(pages)}"
+        plt.suptitle(page_title, fontsize=14, y=1.00)
+        plt.tight_layout()
         if save_path:
             out = _paginated_save_path(Path(save_path), len(pages), page_idx)
             plt.savefig(out, bbox_inches="tight", dpi=150)
@@ -1311,6 +1715,75 @@ def select_weight_pair_snapshot_indices(epochs: np.ndarray) -> list[int]:
     if last_idx not in selected:
         selected.append(last_idx)
     return selected
+
+
+def plot_structuring_element_pair_snapshot(
+    pairs: np.ndarray,
+    *,
+    pareto_mask: np.ndarray,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    expected_point: tuple[float, float],
+    epoch_label: str,
+    save_path: Path | None = None,
+    show: bool = True,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+) -> Path | None:
+    pairs = np.asarray(pairs, dtype=np.float32)
+    if pairs.ndim != 2 or pairs.shape[-1] != 2 or pairs.shape[0] == 0:
+        return None
+    pareto_mask = np.asarray(pareto_mask, dtype=bool)
+    n_filters = pairs.shape[0]
+    if pareto_mask.shape != (n_filters,):
+        pareto_mask = np.zeros(n_filters, dtype=bool)
+
+    fig, ax = plt.subplots(figsize=(6.5, 6.0))
+    ax.axhline(0.0, color="#d0d0d0", linewidth=0.8, zorder=0)
+    ax.axvline(0.0, color="#d0d0d0", linewidth=0.8, zorder=0)
+
+    for filt_idx in range(n_filters):
+        xy = pairs[filt_idx]
+        is_pareto = bool(pareto_mask[filt_idx])
+        color = "red" if is_pareto else "blue"
+        alpha = 0.9 if is_pareto else 0.35
+        zorder = 3 if is_pareto else 1
+        ax.scatter(
+            xy[0],
+            xy[1],
+            color=color,
+            s=18 if is_pareto else 10,
+            alpha=alpha,
+            zorder=zorder,
+        )
+
+    ax.scatter(
+        [expected_point[0]],
+        [expected_point[1]],
+        color="black",
+        marker="*",
+        s=140,
+        label=f"Expected point {expected_point}",
+        zorder=5,
+    )
+    ax.set_xlim(*(xlim if xlim is not None else (-1.0, 1.0)))
+    ax.set_ylim(*(ylim if ylim is not None else (-1.0, 1.0)))
+    ax.set_title(f"{title} — epoch {epoch_label}")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best")
+    plt.tight_layout()
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, bbox_inches="tight", dpi=150)
+    if show:
+        _show_fig_if_interactive()
+    plt.close(fig)
+    return save_path
+
 
 def plot_logged_weight_pair_snapshot_grid(
     *,
@@ -1578,7 +2051,7 @@ def plot_logged_weight_value_histograms(
                 ax.legend(fontsize=6, loc="upper right")
 
             # --- INSET: centered zoom for the typical range [-1, 1] ---
-            has_outliers = (xmin < -.5) or (xmax > .5)
+            has_outliers = (xmin < -1.0) or (xmax > 1.0)
             if has_outliers:
                 axins = inset_axes(ax, width="46%", height="46%", loc="center")
 
@@ -1629,6 +2102,60 @@ def plot_logged_weight_value_histograms(
     return [save_path] if save_path.exists() else []
 
 
+def plot_logged_weight_pair_snapshots(
+    *,
+    weight_pair_logs: dict[str, Any] | None,
+    model_plots_dir: Path,
+    layer_name: str,
+    experiment_label: str,
+    show: bool = False,
+) -> list[Path]:
+    if not weight_pair_logs:
+        return []
+    layer_logs = (weight_pair_logs.get("layers") or {}).get(layer_name)
+    if layer_logs is None:
+        return []
+    layer_weights = (weight_pair_logs.get("weights_full") or {}).get(layer_name)
+    if layer_weights is None:
+        return []
+    model_plots_dir = Path(model_plots_dir)
+    pair_dir = model_plots_dir / f"{layer_name}_pair_snapshots"
+    pair_dir.mkdir(parents=True, exist_ok=True)
+    epochs = np.asarray(weight_pair_logs.get("epochs", []), dtype=np.int32)
+    snapshot_indices = select_weight_pair_snapshot_indices(epochs)
+    if not snapshot_indices:
+        return []
+    written: list[Path] = []
+    for idx in snapshot_indices:
+        epoch_value = int(epochs[idx])
+        epoch_label = "last" if idx == len(epochs) - 1 else str(epoch_value)
+        pair_values_by_key = {
+            spec["key"]: np.asarray(layer_logs[spec["key"]][idx], dtype=np.float32)
+            for spec in STRUCTURING_ELEMENT_PAIR_SPECS
+        }
+        pareto_mask = _pair_snapshot_pareto_mask(
+            np.asarray(layer_weights[idx], dtype=np.float32)
+        )
+        for spec in STRUCTURING_ELEMENT_PAIR_SPECS:
+            save_path = pair_dir / f"{spec['key']}_epoch_{epoch_value:04d}.png"
+            out = plot_structuring_element_pair_snapshot(
+                pair_values_by_key[spec["key"]],
+                pareto_mask=pareto_mask,
+                title=f"{experiment_label} — {layer_name} — {spec['title']}",
+                xlabel=spec["xlabel"],
+                ylabel=spec["ylabel"],
+                expected_point=spec["expected_point"],
+                epoch_label=epoch_label,
+                save_path=save_path,
+                show=show,
+                xlim=spec.get("xlim"),
+                ylim=spec.get("ylim"),
+            )
+            if out is not None and Path(out).exists():
+                written.append(Path(out))
+    return written
+
+
 def plot_training_curves_inline(
     history: dict,
     save_path: str | Path,
@@ -1658,6 +2185,87 @@ def plot_training_curves_inline(
     plt.tight_layout()
     fig.savefig(save_path, bbox_inches="tight", dpi=150)
     plt.close(fig)
+
+
+def plot_results_overlay(
+    results: dict,
+    *,
+    log_scale: bool = False,
+    mode: str = "val",
+    title: str | None = None,
+    save_path: Path | None = None,
+) -> None:
+    mode_norm = mode.strip().lower()
+    if mode_norm not in ("val", "train_val"):
+        raise ValueError("mode must be 'val' or 'train_val'")
+    if title is None:
+        title = "Validation loss" if mode_norm == "val" else "Train vs val loss"
+    colors = _OVERLAY_COLORS
+    histories = results.get("histories") or {}
+    items = list(histories.items())
+    if not items:
+        return
+    if mode_norm == "val":
+        fig, ax = plt.subplots(figsize=(9, 5))
+        for i, (name, hist) in enumerate(items):
+            hist_dict = hist.history if hasattr(hist, "history") else hist
+            vl = hist_dict.get("val_loss", [])
+            if not vl:
+                continue
+            x = range(1, len(vl) + 1)
+            c = colors[i % len(colors)]
+            if log_scale:
+                ax.semilogy(x, np.maximum(vl, 1e-12), color=c, label=name, linewidth=1.4)
+            else:
+                ax.plot(x, vl, color=c, label=name, linewidth=1.4)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("val_loss (MSE), log scale" if log_scale else "val_loss (MSE)")
+        ax.set_title(title)
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(True, alpha=0.3, which="both" if log_scale else "major")
+    else:
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+        for i, (name, hist) in enumerate(items):
+            c = colors[i % len(colors)]
+            hist_dict = hist.history if hasattr(hist, "history") else hist
+            loss = hist_dict.get("loss", [])
+            vl = hist_dict.get("val_loss", [])
+            if log_scale:
+                if loss:
+                    ax0.semilogy(
+                        range(1, len(loss) + 1),
+                        np.maximum(loss, 1e-12),
+                        color=c,
+                        label=name,
+                        linewidth=1.2,
+                    )
+                if vl:
+                    ax1.semilogy(
+                        range(1, len(vl) + 1),
+                        np.maximum(vl, 1e-12),
+                        color=c,
+                        label=name,
+                        linewidth=1.2,
+                    )
+            else:
+                if loss:
+                    ax0.plot(range(1, len(loss) + 1), loss, color=c, label=name, linewidth=1.2)
+                if vl:
+                    ax1.plot(range(1, len(vl) + 1), vl, color=c, label=name, linewidth=1.2)
+        ax0.set_ylabel("Training loss (log)" if log_scale else "Training loss")
+        ax0.legend(loc="upper right", fontsize=7)
+        ax0.grid(True, alpha=0.3, which="both" if log_scale else "major")
+        ax1.set_ylabel("Validation loss (log)" if log_scale else "Validation loss")
+        ax1.set_xlabel("Epoch")
+        ax1.legend(loc="upper right", fontsize=7)
+        ax1.grid(True, alpha=0.3, which="both" if log_scale else "major")
+        fig.suptitle(title, y=1.02)
+    plt.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight", dpi=150)
+    _show_fig_if_interactive()
+    plt.close(fig)
+
 
 def save_per_model_curves(results: dict, out_dir: Path | None) -> None:
     if out_dir is None:
@@ -1818,6 +2426,48 @@ def plot_minimal_elements_overlay(
     _show_fig_if_interactive()
     plt.close(fig)
 
+def plot_prediction_row(
+    pack: dict,
+    results: dict,
+    y_val: np.ndarray,
+    n_samples: int = 3,
+    save_path: Path | None = None,
+) -> None:
+    x_va = pack["x_val"]
+    n = min(n_samples, len(x_va))
+    model_items = list(results["models"].items())
+    ncols = 2 + len(model_items)
+    fig, axes = plt.subplots(n, ncols, figsize=(2.2 * ncols, 2.4 * n))
+    if n == 1:
+        axes = np.expand_dims(axes, 0)
+    for r in range(n):
+        axes[r, 0].imshow(x_va[r, :, :, 0], cmap="bone", vmin=0, vmax=1)
+        axes[r, 0].set_ylabel(f"#{r}", rotation=0, labelpad=12)
+        vmin = float(np.min(y_val[r]))
+        vmax = float(np.max(y_val[r]))
+        axes[r, 1].imshow(y_val[r, :, :, 0], cmap="bone", vmin=vmin, vmax=vmax)
+        if r == 0:
+            axes[r, 0].set_title("Input")
+            axes[r, 1].set_title("Target")
+        for j, (name, model) in enumerate(model_items):
+            p = model.predict(x_va[r : r + 1], verbose=0)
+            p = crop_pred_to_y(np.asarray(p), y_val[r : r + 1])
+            span = max(vmax - vmin, 1e-6)
+            axes[r, j + 2].imshow(
+                p[0, :, :, 0], cmap="bone", vmin=vmin - 0.05 * span, vmax=vmax + 0.05 * span
+            )
+            if r == 0:
+                axes[r, j + 2].set_title(name[:14], fontsize=8)
+        for c in range(ncols):
+            axes[r, c].axis("off")
+    plt.suptitle("Validation: input | target | models", y=1.02)
+    plt.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight", dpi=150)
+    _show_fig_if_interactive()
+    plt.close(fig)
+
+
 def plot_model_predictions_grid(
     pack: dict,
     results: dict,
@@ -1943,7 +2593,7 @@ def plot_suite_structuring_elements(
                 plot_structuring_elements(
                     w,
                     kernel_shape=(kh, kw),
-                    pareto_front=False,
+                    n_show=min(64, N_EROSIONS_SINGLE),
                     title=f"{experiment_label} — {slug} — all structuring elements",
                     save_path=model_plots_dir / "all_kernels.png",
                     show=show,
@@ -1970,10 +2620,9 @@ def plot_suite_structuring_elements(
             )
             pareto_w, _ = extract_pareto_filters(w)
             written.extend(
-                plot_structuring_elements(
+                plot_pareto_elements(
                     pareto_w,
                     kernel_shape=(kh, kw),
-                    pareto_front=True,
                     title=f"{experiment_label} — {slug} — Pareto-minimal elements",
                     save_path=model_plots_dir / "pareto_kernels.png",
                     show=show,
@@ -1981,6 +2630,7 @@ def plot_suite_structuring_elements(
             )
         elif canon in (
             TwoLayerSupErosionsArchitecture.slug,
+            TwoLayerReceptiveFieldArchitecture.slug,
         ):
             for _branch, layer_name in ((1, "Erosions1"), (2, "Erosions2")):
                 w = m.get_layer(layer_name).get_weights()[0]
@@ -1988,7 +2638,7 @@ def plot_suite_structuring_elements(
                     plot_structuring_elements(
                         w,
                         kernel_shape=(kh, kw),
-                        pareto_front=False,
+                        n_show=min(64, w.shape[-1]),
                         title=f"{experiment_label} — {slug} — {layer_name} (all)",
                         save_path=model_plots_dir / f"{layer_name}_all.png",
                         show=show,
@@ -1996,10 +2646,9 @@ def plot_suite_structuring_elements(
                 )
                 pareto_w, _ = extract_pareto_filters(w)
                 written.extend(
-                    plot_structuring_elements(
+                    plot_pareto_elements(
                         pareto_w,
                         kernel_shape=(kh, kw),
-                        pareto_front=True,
                         title=f"{experiment_label} — {slug} — {layer_name} (Pareto)",
                         save_path=model_plots_dir / f"{layer_name}_pareto.png",
                         show=show,
@@ -2047,8 +2696,6 @@ def run_comparison_plots(
     n_pred_samples: int = 4,
     training_overlay_slugs: Sequence[str] | None = None,
     prediction_grid_slugs: Sequence[str] | None = None,
-    include_minimal_elements_overlay: bool = True,
-    include_structuring_element_plots: bool = True,
 ) -> list[Path]:
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
@@ -2077,15 +2724,47 @@ def run_comparison_plots(
             model_slugs=overlay_slugs,
         )
         saved.append(plots_dir / "four_pixel_three_way_overlay_log.png")
-        if include_minimal_elements_overlay:
-            plot_minimal_elements_overlay(
-                suite,
-                save_path=plots_dir / "minimal_elements_overlay.png",
-                title=f"{target_label} — minimal elements over training",
-                model_slugs=overlay_slugs,
-                epoch_stride=MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE,
-            )
-            saved.append(plots_dir / "minimal_elements_overlay.png")
+        plot_minimal_elements_overlay(
+            suite,
+            save_path=plots_dir / "minimal_elements_overlay.png",
+            title=f"{target_label} — minimal elements over training",
+            model_slugs=overlay_slugs,
+            epoch_stride=MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE,
+        )
+        saved.append(plots_dir / "minimal_elements_overlay.png")
+
+    plot_results_overlay(
+        suite,
+        log_scale=False,
+        mode="val",
+        title="Validation loss — all models",
+        save_path=plots_dir / "val_loss_overlay.png",
+    )
+    saved.append(plots_dir / "val_loss_overlay.png")
+    plot_results_overlay(
+        suite,
+        log_scale=True,
+        mode="val",
+        title="Validation loss — all models (log)",
+        save_path=plots_dir / "val_loss_overlay_log.png",
+    )
+    saved.append(plots_dir / "val_loss_overlay_log.png")
+    plot_results_overlay(
+        suite,
+        log_scale=False,
+        mode="train_val",
+        title="Train / val — all models",
+        save_path=plots_dir / "train_val_overlay.png",
+    )
+    saved.append(plots_dir / "train_val_overlay.png")
+    plot_results_overlay(
+        suite,
+        log_scale=True,
+        mode="train_val",
+        title="Train / val — all models (log)",
+        save_path=plots_dir / "train_val_overlay_log.png",
+    )
+    saved.append(plots_dir / "train_val_overlay_log.png")
 
     save_per_model_curves(suite, plots_dir)
     for name in (suite.get("histories") or {}):
@@ -2109,18 +2788,27 @@ def run_comparison_plots(
         )
         saved.append(plots_dir / "four_pixel_prediction_three_way.png")
 
-    if include_structuring_element_plots:
-        se_paths = plot_suite_structuring_elements(
+    if models:
+        plot_prediction_row(
+            pack,
             suite,
-            plots_dir,
-            experiment_label=target_label,
-            show=show,
+            y_val,
+            n_samples=min(3, len(y_val)),
+            save_path=plots_dir / "prediction_comparison_all_models.png",
         )
-        saved.extend(se_paths)
+        saved.append(plots_dir / "prediction_comparison_all_models.png")
+
+    se_paths = plot_suite_structuring_elements(
+        suite,
+        plots_dir,
+        experiment_label=target_label,
+        show=show,
+    )
+    saved.extend(se_paths)
     return [p for p in saved if Path(p).exists()]
 
 
-# %% [markdown]
+# %% [markdown] id="1cf2e4aa"
 # ## 9. Interpretation
 #
 # - **Depth:** Two-layer models build two parallel sup-erosion fields, then the combiner applies an outer
@@ -2134,7 +2822,7 @@ def run_comparison_plots(
 # - **Paper-style statistics:** Use **`run_experiment_repeated`** and **`repetitions_summary.json`** for mean and
 #   standard deviation of validation error and for the **success rate** at threshold $Q$.
 
-# %% [markdown]
+# %% [markdown] id="39c4b76f"
 # ## 10. Experiment driver
 #
 # **`run_experiment`** loads data and targets, calls **`train_and_eval_suite`**, writes **`metrics.json`** and
@@ -2147,11 +2835,10 @@ def run_comparison_plots(
 # its own checkpoints and plots; **`repetitions_summary.json`** at the run root reports **mean / std** of
 # **val_mse** and the **success rate** (fraction of reps with **val_mse** $< Q$).
 
-# %%
+# %% id="80518904"
 def build_experiment_metadata(
     run_dir: Path, pack: dict, suite: dict, *, target_meta: dict[str, Any]
 ) -> dict:
-    dataset_size_meta = int(pack["x_train"].shape[0]) if "x_train" in pack else int(DATASET_SIZE)
     meta = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "run_dir": str(run_dir.resolve()),
@@ -2176,7 +2863,7 @@ def build_experiment_metadata(
             "val_loss_threshold": VAL_LOSS_EARLY_STOP_THRESHOLD,
             "training_callback_mode": TRAINING_CALLBACK_MODE,
             "noise_sigma": NOISE_SIGMA,
-            "dataset_size": dataset_size_meta,
+            "dataset_size": DATASET_SIZE,
             "rf_block1_inactive": RF_BLOCK1_INACTIVE,
             "rf_block2_inactive": RF_BLOCK2_INACTIVE,
             "training_update_rule": suite.get("update_rule", TRAINING_UPDATE_RULE),
@@ -2207,20 +2894,16 @@ def write_metrics_and_metadata(
 ) -> tuple[Path, Path]:
     run_dir = Path(run_dir)
     meta = build_experiment_metadata(run_dir, pack, suite, target_meta=target_meta)
-    minimal_logs_json = minimal_elements_logs_to_json_safe(
-        suite.get("minimal_elements_logs", {})
-    )
     metrics = {
         "val_mse": dict(suite["val_mse"]),
         "histories": histories_to_json_safe(suite["histories"]),
-        "minimal_elements_logs": minimal_logs_json,
+        "minimal_elements_logs": minimal_elements_logs_to_json_safe(
+            suite.get("minimal_elements_logs", {})
+        ),
     }
     mp = run_dir / "metrics.json"
     with open(mp, "w") as f:
         json.dump(metrics, f, indent=2)
-    minimal_logs_path = run_dir / "minimal_elements_logs.json"
-    with open(minimal_logs_path, "w") as f:
-        json.dump(minimal_logs_json, f, indent=2)
     metap = run_dir / "metadata.json"
     with open(metap, "w") as f:
         json.dump(meta, f, indent=2)
@@ -2236,24 +2919,107 @@ def print_experiment_summary(run_dir: Path, suite: dict) -> None:
         print(f"  {slug}: val_mse = {suite['val_mse'].get(slug, float('nan')):.6f}")
     print("=" * 72 + "\n")
 
-# %%
-def run_k_deactivated_initialization_experiment_repeated(
+
+def run_experiment(
     out_dir: Path | str | None = None,
     *,
-    n_repetitions: int | None = None,
-    dataset_size: int = DATASET_SIZE,
-    data_seed: int = DATA_LOAD_SEED,
-    training_seed_base: int = RANDOM_SEED,
-    training_seed_step: int = TRAINING_SEED_STEP,
+    models_to_train: Sequence[str] | None = None,
     notebook: bool = False,
     dated_subdir: bool = True,
-    k_values: Sequence[int] | None = None,
     update_rule: str = TRAINING_UPDATE_RULE,
     sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
     sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
     sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
+    k_deactivated_components: int = 0,
+) -> dict:
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    parent = Path(out_dir).expanduser()
+    parent.mkdir(parents=True, exist_ok=True)
+    prefix = f"exp_{EXPERIMENT_TARGET_SLUG}"
+    if dated_subdir:
+        run_dir = new_dated_experiment_dir(parent, prefix)
+    else:
+        run_dir = parent
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "plots").mkdir(exist_ok=True)
+        (run_dir / "checkpoints").mkdir(exist_ok=True)
+
+    plots_dir = run_dir / "plots"
+    ck_root = run_dir / "checkpoints"
+
+    pack = load_fashion_mnist_four_pixel_pack(seed=DATA_LOAD_SEED)
+    y_train, y_val, _y_test, target_meta = compute_experiment_targets(pack)
+
+    print("Target:", target_meta["target_key"], "—", target_meta["target_label"])
+    print("Models:", [c.slug for c in parse_models_to_train(models_to_train)])
+    print("Shapes: x_train", pack["x_train"].shape, "y_train", y_train.shape)
+    print("Experiment run directory:", run_dir)
+
+    suite = train_and_eval_suite(
+        pack,
+        y_train,
+        y_val,
+        epochs=EPOCHS_MAIN,
+        batch_size=BATCH_SIZE,
+        lr=LEARNING_RATE,
+        verbose=1,
+        checkpoint_root=ck_root,
+        models_to_train=models_to_train,
+        update_rule=update_rule,
+        sparse_mask_min=sparse_mask_min,
+        sparse_mask_max=sparse_mask_max,
+        sparse_grad_zero_atol=sparse_grad_zero_atol,
+        k_deactivated_components=k_deactivated_components,
+    )
+    suite["experiment_run_dir"] = str(run_dir.resolve())
+    weight_pair_log_files = save_weight_pair_logs(suite, run_dir / "weight_pair_logs")
+    suite["weight_pair_logs_dir"] = str((run_dir / "weight_pair_logs").resolve())
+    suite["weight_pair_log_files"] = [str(p.relative_to(run_dir)) for p in weight_pair_log_files]
+    write_metrics_and_metadata(run_dir, pack, suite, target_meta=target_meta)
+    run_comparison_plots(
+        suite,
+        pack,
+        y_val,
+        plots_dir,
+        target_label=target_meta["target_label"],
+        show=False,
+        n_pred_samples=min(4, len(y_val)),
+    )
+    print_experiment_summary(run_dir, suite)
+
+    if notebook:
+        try:
+            from IPython.display import Image, Markdown, display
+
+            display(Markdown(f"**Run:** `{run_dir}`"))
+            display(Markdown(f"**Figures:** `{plots_dir}`"))
+            for p in sorted(plots_dir.glob("*.png")):
+                display(Image(filename=str(p)))
+        except ImportError:
+            pass
+
+    return suite
+
+
+def run_experiment_repeated(
+    out_dir: Path | str | None = None,
+    *,
+    n_repetitions: int | None = None,
+    data_seed: int = DATA_LOAD_SEED,
+    training_seed_base: int = RANDOM_SEED,
+    training_seed_step: int = TRAINING_SEED_STEP,
+    models_to_train: Sequence[str] | None = None,
+    notebook: bool = False,
+    dated_subdir: bool = True,
+    update_rule: str = TRAINING_UPDATE_RULE,
+    sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
+    sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
+    sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
+    k_deactivated_components: int = 0,
 ) -> dict[str, Any]:
-    """Repeated k-deactivated initialization runs with per-repetition training seeds."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -2264,7 +3030,7 @@ def run_k_deactivated_initialization_experiment_repeated(
 
     parent = Path(out_dir).expanduser()
     parent.mkdir(parents=True, exist_ok=True)
-    prefix = f"exp_{EXPERIMENT_TARGET_SLUG}_k_deactivated_grid_repeated"
+    prefix = f"exp_{EXPERIMENT_TARGET_SLUG}_repeated"
     if dated_subdir:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
         run_dir = parent / f"{prefix}_{ts}"
@@ -2273,35 +3039,16 @@ def run_k_deactivated_initialization_experiment_repeated(
         run_dir = parent
         run_dir.mkdir(parents=True, exist_ok=True)
 
-    arch_k_grid: dict[str, list[int]] = {
-        SingleSupErosionsArchitecture.slug: [0],
-        TwoLayerSupErosionsArchitecture.slug: (
-            [0, 1, 2, 3] if k_values is None else [int(x) for x in k_values]
-        ),
-    }
-
-    if int(dataset_size) < 1:
-        raise ValueError("dataset_size must be >= 1")
-    pack = load_fashion_mnist_four_pixel_pack(
-        dataset_size=int(dataset_size),
-        seed=data_seed,
-    )
+    pack = load_fashion_mnist_four_pixel_pack(seed=data_seed)
     y_train, y_val, _y_test, target_meta = compute_experiment_targets(pack)
     q_thresh = float(VAL_LOSS_EARLY_STOP_THRESHOLD)
+
     per_rep: list[dict[str, Any]] = []
     last_suite: dict[str, Any] = {}
-    repetition_dirs: list[str] = []
-
-    print("Target:", target_meta["target_key"], "—", target_meta["target_label"])
-    print("K-deactivated repeated grid:", arch_k_grid)
-    print("Dataset size:", int(dataset_size))
-    print("Shapes: x_train", pack["x_train"].shape, "y_train", y_train.shape)
-    print("Repeated run directory:", run_dir)
 
     for rep in range(n):
         rep_tag = f"rep_{rep:02d}"
         rep_dir = run_dir / rep_tag
-        repetition_dirs.append(str(rep_dir.resolve()))
         plots_dir = rep_dir / "plots"
         ck_root = rep_dir / "checkpoints"
         plots_dir.mkdir(parents=True, exist_ok=True)
@@ -2311,42 +3058,31 @@ def run_k_deactivated_initialization_experiment_repeated(
         keras.utils.set_random_seed(rep_training_seed)
 
         print(
-            f"\n{'=' * 72}\nK-deactivated repetition {rep + 1}/{n}  (training seed={rep_training_seed})\n{'=' * 72}"
+            f"\n{'=' * 72}\nRepetition {rep + 1}/{n}  (training seed={rep_training_seed})\n{'=' * 72}"
         )
-        per_arch_suites: list[dict[str, Any]] = []
-        for arch_slug, arch_ks in arch_k_grid.items():
-            per_arch_suites.append(
-                train_and_eval_k_deactivated_variants_suite(
-                    pack,
-                    y_train,
-                    y_val,
-                    base_arch_slugs=[arch_slug],
-                    k_values=arch_ks,
-                    epochs=EPOCHS_MAIN,
-                    batch_size=BATCH_SIZE,
-                    lr=LEARNING_RATE,
-                    verbose=1,
-                    checkpoint_root=ck_root,
-                    update_rule=update_rule,
-                    sparse_mask_min=sparse_mask_min,
-                    sparse_mask_max=sparse_mask_max,
-                    sparse_grad_zero_atol=sparse_grad_zero_atol,
-                )
-            )
-        suite = dict(per_arch_suites[0])
-        for extra_suite in per_arch_suites[1:]:
-            for key in ("histories", "val_mse", "models", "weight_pair_logs", "minimal_elements_logs"):
-                suite[key].update(extra_suite[key])
-            suite["models_to_train"].extend(extra_suite["models_to_train"])
-            suite["initialization_variants"].extend(extra_suite["initialization_variants"])
+        suite = train_and_eval_suite(
+            pack,
+            y_train,
+            y_val,
+            epochs=EPOCHS_MAIN,
+            batch_size=BATCH_SIZE,
+            lr=LEARNING_RATE,
+            verbose=1,
+            checkpoint_root=ck_root,
+            models_to_train=models_to_train,
+            update_rule=update_rule,
+            sparse_mask_min=sparse_mask_min,
+            sparse_mask_max=sparse_mask_max,
+            sparse_grad_zero_atol=sparse_grad_zero_atol,
+            k_deactivated_components=k_deactivated_components,
+        )
         suite["experiment_run_dir"] = str(rep_dir.resolve())
         suite["repetition_index"] = rep
         suite["training_seed"] = rep_training_seed
-        variant_slugs = list(suite["models_to_train"])
-
         weight_pair_log_files = save_weight_pair_logs(suite, rep_dir / "weight_pair_logs")
         suite["weight_pair_logs_dir"] = str((rep_dir / "weight_pair_logs").resolve())
         suite["weight_pair_log_files"] = [str(p.relative_to(rep_dir)) for p in weight_pair_log_files]
+
         write_metrics_and_metadata(rep_dir, pack, suite, target_meta=target_meta)
         run_comparison_plots(
             suite,
@@ -2356,139 +3092,55 @@ def run_k_deactivated_initialization_experiment_repeated(
             target_label=target_meta["target_label"],
             show=False,
             n_pred_samples=min(4, len(y_val)),
-            training_overlay_slugs=variant_slugs,
-            prediction_grid_slugs=variant_slugs,
-            include_minimal_elements_overlay=True,
-            include_structuring_element_plots=False,
         )
 
-        val_mse = dict(suite.get("val_mse", {}))
+        val_mse = dict(suite["val_mse"])
         success = {slug: float(val_mse[slug]) < q_thresh for slug in val_mse}
-        histories_json = histories_to_json_safe(suite.get("histories", {}))
-        threshold_progress: dict[str, dict[str, Any]] = {}
-        for slug in val_mse:
-            hist = histories_json.get(slug, {})
-            val_loss_curve = [float(v) for v in hist.get("val_loss", [])]
-            epochs_ran = int(len(val_loss_curve))
-            reached_threshold = any(v <= q_thresh for v in val_loss_curve)
-            first_reached_epoch = next(
-                (int(i + 1) for i, v in enumerate(val_loss_curve) if v <= q_thresh),
-                None,
-            )
-            reached_before_max_epochs = (
-                reached_threshold
-                and first_reached_epoch is not None
-                and first_reached_epoch < int(EPOCHS_MAIN)
-            )
-            threshold_progress[slug] = {
-                "epochs_ran": epochs_ran,
-                "reached_threshold_during_training": bool(reached_threshold),
-                "first_epoch_reaching_threshold": first_reached_epoch,
-                "reached_before_max_epochs": bool(reached_before_max_epochs),
-            }
-        metadata_path = rep_dir / "metadata.json"
-        metrics_path = rep_dir / "metrics.json"
-        minimal_logs_path = rep_dir / "minimal_elements_logs.json"
         per_rep.append(
             {
                 "repetition": rep,
                 "training_seed": rep_training_seed,
-                "run_dir": str(rep_dir.resolve()),
                 "val_mse": {k: float(v) for k, v in val_mse.items()},
                 "success": success,
-                "threshold_progress": threshold_progress,
-                "models_trained": list(suite.get("models_to_train", [])),
-                "saved_artifacts": {
-                    "metadata_json": str(metadata_path.resolve()),
-                    "metrics_json": str(metrics_path.resolve()),
-                    "minimal_elements_logs_json": str(minimal_logs_path.resolve()),
-                    "plots_dir": str(plots_dir.resolve()),
-                    "checkpoints_dir": str(ck_root.resolve()),
-                    "weight_pair_logs_dir": suite.get("weight_pair_logs_dir"),
-                    "weight_pair_log_files": list(suite.get("weight_pair_log_files", [])),
-                },
             }
         )
         last_suite = suite
 
-    slugs = list(per_rep[0]["val_mse"].keys()) if per_rep else []
+    slugs = list(per_rep[0]["val_mse"].keys())
     aggregate: dict[str, Any] = {}
     for slug in slugs:
         vals = np.array([float(r["val_mse"][slug]) for r in per_rep], dtype=np.float64)
         successes = sum(1 for r in per_rep if r["success"][slug])
-        reached_threshold_count = sum(
-            1
-            for r in per_rep
-            if bool(
-                (r.get("threshold_progress", {}).get(slug, {})).get(
-                    "reached_threshold_during_training", False
-                )
-            )
-        )
-        reached_before_max_count = sum(
-            1
-            for r in per_rep
-            if bool(
-                (r.get("threshold_progress", {}).get(slug, {})).get(
-                    "reached_before_max_epochs", False
-                )
-            )
-        )
         std = float(vals.std(ddof=1)) if n > 1 else 0.0
         aggregate[slug] = {
             "mean_val_mse": float(vals.mean()),
             "std_val_mse": std,
             "success_rate": successes / n,
             "n_successes": int(successes),
-            "reached_threshold_during_training_rate": reached_threshold_count / n,
-            "n_reached_threshold_during_training": int(reached_threshold_count),
-            "reached_before_max_epochs_rate": reached_before_max_count / n,
-            "n_reached_before_max_epochs": int(reached_before_max_count),
         }
 
     summary: dict[str, Any] = {
-        "protocol": "k_deactivated_initialization_grid_repeated",
-        "created_utc": datetime.now(timezone.utc).isoformat(),
-        "run_dir": str(run_dir.resolve()),
-        "summary_file": str((run_dir / "k_deactivated_repetitions_summary.json").resolve()),
+        "protocol": "four_pixel_average_repeated",
         "n_repetitions": n,
         "Q": q_thresh,
-        "dataset": pack.get("dataset"),
-        "img_size": [int(pack["H"]), int(pack["W"])],
-        "target_key": target_meta.get("target_key"),
-        "target_label": target_meta.get("target_label"),
-        "dataset_size": int(dataset_size),
         "data_seed": int(data_seed),
         "training_seed_base": int(training_seed_base),
         "training_seed_step": int(training_seed_step),
-        "architectures": list(arch_k_grid.keys()),
-        "k_values": sorted({int(k) for ks_arch in arch_k_grid.values() for k in ks_arch}),
-        "k_values_by_architecture": {k: list(v) for k, v in arch_k_grid.items()},
-        "update_rule": str(update_rule),
-        "sparse_mask_min": float(sparse_mask_min),
-        "sparse_mask_max": float(sparse_mask_max),
-        "sparse_grad_zero_atol": float(sparse_grad_zero_atol),
-        "repetition_dirs": repetition_dirs,
         "per_repetition": per_rep,
         "aggregate": aggregate,
     }
-    summary_path = run_dir / "k_deactivated_repetitions_summary.json"
+    summary_path = run_dir / "repetitions_summary.json"
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
 
     print("\n" + "=" * 72)
-    print(f"K-deactivated repeated run directory: {run_dir.resolve()}")
+    print(f"Repeated protocol run directory: {run_dir.resolve()}")
     print(f"Summary: {summary_path}")
     for slug in slugs:
         a = aggregate[slug]
         print(
             f"  {slug}: mean val_mse={a['mean_val_mse']:.6f} ± {a['std_val_mse']:.6f}, "
-            f"success_rate(final<{q_thresh:.6f})={a['success_rate']:.2f} "
-            f"({a['n_successes']}/{n}), "
-            f"reached_threshold_during_training={a['reached_threshold_during_training_rate']:.2f} "
-            f"({a['n_reached_threshold_during_training']}/{n}), "
-            f"reached_before_EPOCHS_MAIN({EPOCHS_MAIN})={a['reached_before_max_epochs_rate']:.2f} "
-            f"({a['n_reached_before_max_epochs']}/{n})"
+            f"success_rate={a['success_rate']:.2f}"
         )
     print("=" * 72 + "\n")
 
@@ -2496,30 +3148,143 @@ def run_k_deactivated_initialization_experiment_repeated(
         try:
             from IPython.display import Markdown, display
 
-            display(Markdown(f"**K-deactivated repeated run:** `{run_dir}`"))
+            display(Markdown(f"**Repeated run:** `{run_dir}`"))
             display(Markdown(f"**Summary:** `{summary_path}`"))
         except ImportError:
             pass
 
     return {
         "run_dir": str(run_dir.resolve()),
-        "summary_path": str(summary_path.resolve()),
+        "summary_path": str(summary_path),
         "summary": summary,
         "last_suite": last_suite,
     }
 
-# %%
+
+# %% id="91bd37dd"
+def run_k_deactivated_initialization_experiment(
+    out_dir: Path | str | None = None,
+    *,
+    notebook: bool = False,
+    dated_subdir: bool = True,
+    k_values: Sequence[int] | None = None,
+    update_rule: str = TRAINING_UPDATE_RULE,
+    sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
+    sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
+    sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
+) -> dict[str, Any]:
+    """
+    Single experiment run (same layout as ``run_experiment``): one ``run_dir``,
+    data loaded once, then **10** trainings — each base architecture with
+    ``k_deactivated_components`` in ``{0,1,2,3,4}``. Model keys are
+    ``{base}__kd{k}`` (e.g. ``single_sup__kd0`` is normal init).
+
+    Combined plots (e.g. ``val_loss_overlay.png``) include **all** variants.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    parent = Path(out_dir).expanduser()
+    parent.mkdir(parents=True, exist_ok=True)
+    prefix = f"exp_{EXPERIMENT_TARGET_SLUG}_k_deactivated_grid"
+    if dated_subdir:
+        run_dir = new_dated_experiment_dir(parent, prefix)
+    else:
+        run_dir = parent
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "plots").mkdir(exist_ok=True)
+        (run_dir / "checkpoints").mkdir(exist_ok=True)
+
+    plots_dir = run_dir / "plots"
+    ck_root = run_dir / "checkpoints"
+
+    arch_slugs = [
+        SingleSupErosionsArchitecture.slug,
+        TwoLayerSupErosionsArchitecture.slug,
+    ]
+    ks = [0, 1, 2, 3, 4] if k_values is None else [int(x) for x in k_values]
+
+    pack = load_fashion_mnist_four_pixel_pack(seed=DATA_LOAD_SEED)
+    y_train, y_val, _y_test, target_meta = compute_experiment_targets(pack)
+
+    print("Target:", target_meta["target_key"], "—", target_meta["target_label"])
+    print("K-deactivated grid: architectures", arch_slugs, "k_values", ks)
+    print("Shapes: x_train", pack["x_train"].shape, "y_train", y_train.shape)
+    print("Experiment run directory:", run_dir)
+
+    suite = train_and_eval_k_deactivated_variants_suite(
+        pack,
+        y_train,
+        y_val,
+        base_arch_slugs=arch_slugs,
+        k_values=ks,
+        epochs=EPOCHS_MAIN,
+        batch_size=BATCH_SIZE,
+        lr=LEARNING_RATE,
+        verbose=1,
+        checkpoint_root=ck_root,
+        update_rule=update_rule,
+        sparse_mask_min=sparse_mask_min,
+        sparse_mask_max=sparse_mask_max,
+        sparse_grad_zero_atol=sparse_grad_zero_atol,
+    )
+    suite["experiment_run_dir"] = str(run_dir.resolve())
+    variant_slugs = list(suite["models_to_train"])
+
+    weight_pair_log_files = save_weight_pair_logs(suite, run_dir / "weight_pair_logs")
+    suite["weight_pair_logs_dir"] = str((run_dir / "weight_pair_logs").resolve())
+    suite["weight_pair_log_files"] = [str(p.relative_to(run_dir)) for p in weight_pair_log_files]
+    write_metrics_and_metadata(run_dir, pack, suite, target_meta=target_meta)
+    run_comparison_plots(
+        suite,
+        pack,
+        y_val,
+        plots_dir,
+        target_label=target_meta["target_label"],
+        show=False,
+        n_pred_samples=min(4, len(y_val)),
+        training_overlay_slugs=variant_slugs,
+        prediction_grid_slugs=variant_slugs,
+    )
+    print_experiment_summary(run_dir, suite)
+
+    summary = {
+        "protocol": suite.get("protocol", "k_deactivated_initialization_grid"),
+        "run_dir": str(run_dir.resolve()),
+        "architectures": arch_slugs,
+        "k_values": ks,
+        "variant_slugs": variant_slugs,
+        "val_mse": {k: float(v) for k, v in suite.get("val_mse", {}).items()},
+    }
+    summary_path = run_dir / "k_deactivated_summary.json"
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    if notebook:
+        try:
+            from IPython.display import Image, Markdown, display
+
+            display(Markdown(f"**K-deactivated run:** `{run_dir}`"))
+            display(Markdown(f"**Summary:** `{summary_path}`"))
+            display(Markdown(f"**Figures:** `{plots_dir}`"))
+            for p in sorted(plots_dir.glob("*.png")):
+                display(Image(filename=str(p)))
+        except ImportError:
+            pass
+
+    return {
+        "suite": suite,
+        "run_dir": str(run_dir.resolve()),
+        "summary_path": str(summary_path.resolve()),
+        "summary": summary,
+    }
+
+# %% id="ff04b33e"
 def regenerate_experiment_plots(
     run_dir: Path | str,
     *,
     show: bool = False,
-    output_subdir: str = "regenerate_plots",
-    data_seed: int | None = None,
-    n_pred_samples: int = 4,
-    include_minimal_elements_overlay: bool = True,
-    include_structuring_element_plots: bool = True,
-    training_overlay_slugs: Sequence[str] | None = None,
-    prediction_grid_slugs: Sequence[str] | None = None,
 ) -> None:
     """
     Regenerate all plots for an existing experiment directory.
@@ -2591,7 +3356,7 @@ def regenerate_experiment_plots(
     def _process_single_run(local_dir: Path):
         print(f"\nProcessing: {local_dir}")
 
-        plots_dir = local_dir / output_subdir
+        plots_dir = local_dir / "regenerate_plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
 
         # --- load metadata ---
@@ -2610,30 +3375,14 @@ def regenerate_experiment_plots(
                 metrics = json.load(f)
         else:
             metrics = {}
-        minimal_logs_path = local_dir / "minimal_elements_logs.json"
-        if minimal_logs_path.exists():
-            with open(minimal_logs_path, "r") as f:
-                minimal_logs = json.load(f)
-        else:
-            minimal_logs = metrics.get("minimal_elements_logs", {})
         if not suite.get("histories"):
             suite["histories"] = metrics.get("histories", {})
         if not suite.get("val_mse"):
             suite["val_mse"] = metrics.get("val_mse", {})
-        if not suite.get("minimal_elements_logs"):
-            suite["minimal_elements_logs"] = minimal_logs
         suite.setdefault("models", {})
 
         # --- reload dataset (needed for prediction plots) ---
-        metadata_hparams = metadata.get("hyperparameters", {})
-        resolved_data_seed = data_seed
-        if resolved_data_seed is None:
-            resolved_data_seed = metadata_hparams.get("data_load_seed", DATA_LOAD_SEED)
-        resolved_dataset_size = metadata_hparams.get("dataset_size", DATASET_SIZE)
-        pack = load_fashion_mnist_four_pixel_pack(
-            dataset_size=int(resolved_dataset_size),
-            seed=int(resolved_data_seed),
-        )
+        pack = load_fashion_mnist_four_pixel_pack(seed=DATA_LOAD_SEED)
         _, y_val, _y_test, target_meta = compute_experiment_targets(pack)
         input_shape = (int(pack["H"]), int(pack["W"]), 1)
 
@@ -2666,19 +3415,6 @@ def regenerate_experiment_plots(
         suite["weight_pair_logs"] = _load_weight_pair_logs(local_dir / "weight_pair_logs")
 
         # --- regenerate comparison plots ---
-        plot_slugs = [str(s) for s in metadata.get("models_trained", []) if str(s).strip()]
-        if not plot_slugs:
-            plot_slugs = [str(s) for s in suite.get("histories", {}) if str(s).strip()]
-        overlay_slugs_local = (
-            [str(s) for s in training_overlay_slugs]
-            if training_overlay_slugs is not None
-            else plot_slugs or None
-        )
-        prediction_slugs_local = (
-            [str(s) for s in prediction_grid_slugs]
-            if prediction_grid_slugs is not None
-            else plot_slugs or None
-        )
         run_comparison_plots(
             suite,
             pack,
@@ -2686,11 +3422,7 @@ def regenerate_experiment_plots(
             plots_dir,
             target_label=target_meta["target_label"],
             show=show,
-            n_pred_samples=min(int(n_pred_samples), len(y_val)),
-            training_overlay_slugs=overlay_slugs_local,
-            prediction_grid_slugs=prediction_slugs_local,
-            include_minimal_elements_overlay=include_minimal_elements_overlay,
-            include_structuring_element_plots=include_structuring_element_plots,
+            n_pred_samples=min(4, len(y_val)),
         )
 
         print(f"Done: {local_dir}")
@@ -2708,7 +3440,7 @@ def regenerate_experiment_plots(
     print("\nAll plots regenerated.")
 
 
-# %%
+# %% id="fb79203c"
 # def main(
 #     out_dir: Path | str | None = None,
 #     *,
@@ -2722,22 +3454,28 @@ def regenerate_experiment_plots(
 # if __name__ == "__main__":
 #     main(notebook=False, dated_subdir=True)
 
-# %%
+# %% colab={"base_uri": "https://localhost:8080/"} id="8f14e618" outputId="04cad342-0874-481d-ff5d-ff5ed2dc4ac7"
 from google.colab import drive
 drive.mount('/content/drive')
 
-# %%
-for ds in (100, 500, 1000):
-    run_k_deactivated_initialization_experiment_repeated(
-        out_dir="/content/outputs",
-        n_repetitions=N_TRAINING_REPETITIONS,
-        dataset_size=ds,
-        notebook=False,
-        dated_subdir=True,
+# %% id="b4031839"
+run_experiment(
+        out_dir='/content/outputs', notebook=False, dated_subdir=True
     )
 
-# %%
-# !cp -r '/content/outputs/' '/content/drive/MyDrive/experiments-dima-cluster/'
+# %% colab={"base_uri": "https://localhost:8080/", "height": 1000} id="e22ecec4" outputId="7c9f86f4-4141-4cdb-c499-3379b4433332"
+run_k_deactivated_initialization_experiment(
+    out_dir='/content/outputs', notebook=False, dated_subdir=True
+)
 
-# %%
-regenerate_experiment_plots("/content/outputs/exp_four_pixel_average_k_deactivated_grid_2026-04-21_221420")
+# %% id="78271948"
+# !cp -r '/content/outputs/' '/content/drive/MyDrive/experiments-dima/'
+
+# %% id="c5fc68e1"
+# !cp -r '/content/drive/MyDrive/experiments-dima/outputs/exp_four_pixel_average_k_deactivated_grid_2026-04-21_221420' '/content/outputs/exp_four_pixel_average_k_deactivated_grid_2026-04-21_221420'
+
+# %% colab={"base_uri": "https://localhost:8080/"} id="09744197" outputId="f1441b22-88fa-4f53-ddd7-5882aa322dc6"
+regenerate_experiment_plots("/content/outputs/exp_four_pixel_average_k_deactivated_grid_2026-04-24_005509")
+
+# %% colab={"base_uri": "https://localhost:8080/"} id="erpbxZknGfjh" outputId="f9e24c1d-906e-4562-c90f-d7f92461b19a"
+# !ls outputs
