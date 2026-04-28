@@ -117,7 +117,7 @@ N_EROSIONS_TL1 = 500
 N_EROSIONS_TL2 = 500
 N_EROSIONS_TL3 = 700
 
-EPOCHS_MAIN = 1000
+EPOCHS_MAIN = 750
 BATCH_SIZE = 50
 LEARNING_RATE = 0.01
 
@@ -537,93 +537,6 @@ class TwoLayerSupErosionsArchitecture:
 
 
 # %% [markdown]
-# ### 5.5 Two-layer model with receptive-field specialization
-#
-# Same topology as the two-bank model in **5.4**, but after **`build`** we overwrite selected entries of the dilation weights so certain
-# patch positions in each bank stay inactive (large negative), nudging the two banks toward different stencils.
-
-# %%
-def _apply_receptive_field_masks(
-    model: keras.Model,
-    block1_inactive: list[int],
-    block2_inactive: list[int],
-    inactive_value: float,
-) -> None:
-    if block1_inactive:
-        layer = model.get_layer("Erosions1")
-        w = layer.get_weights()[0]
-        for idx in block1_inactive:
-            w[0, 0, 0, idx, :] = inactive_value
-        layer.set_weights([w])
-    if block2_inactive:
-        layer = model.get_layer("Erosions2")
-        w = layer.get_weights()[0]
-        for idx in block2_inactive:
-            w[0, 0, 0, idx, :] = inactive_value
-        layer.set_weights([w])
-
-
-class TwoLayerReceptiveFieldArchitecture:
-    slug = "two_layer_rf"
-    display_name = "Two-layer sup-erosions + receptive-field masks"
-
-    @classmethod
-    def build(
-        cls,
-        input_shape: tuple[int, int, int],
-        kernel_size: tuple[int, int],
-        *,
-        k_deactivated_components: int = 0,
-    ) -> keras.Model:
-        padding = (kernel_size[0] // 2, kernel_size[1] // 2)
-        input_im = keras.layers.Input(shape=input_shape, name="inputLayer")
-        input_padding = keras.layers.ZeroPadding2D(padding=padding)(input_im)
-        dil1 = MyOwnDilation(
-            filters=N_EROSIONS_TL1,
-            kernel_size=kernel_size,
-            stride=(1, 1),
-            padding="VALID",
-            minval=INIT_MIN,
-            maxval=INIT_MAX,
-            seed=RANDOM_SEED,
-            name="Erosions1",
-        )
-        out_erosions1 = -dil1(-input_padding)
-        sup_erosions1 = keras.ops.max(out_erosions1, axis=-1, keepdims=True)
-        dil2 = MyOwnDilation(
-            filters=N_EROSIONS_TL2,
-            kernel_size=kernel_size,
-            stride=(1, 1),
-            padding="VALID",
-            minval=INIT_MIN,
-            maxval=INIT_MAX,
-            seed=RANDOM_SEED,
-            name="Erosions2",
-        )
-        out_erosions2 = -dil2(-input_padding)
-        sup_erosions2 = keras.ops.max(out_erosions2, axis=-1, keepdims=True)
-        xout = SupErosions_block(
-            n_erosions=N_EROSIONS_TL3,
-            minval=INIT_MIN,
-            maxval=INIT_MAX,
-            seed=RANDOM_SEED,
-            name="SupErosions_3",
-        )([sup_erosions1, sup_erosions2])
-        model = keras.Model(input_im, xout, name=cls.slug)
-        model.build((None,) + input_shape)
-        apply_k_deactivated_structuring_elements_init(
-            model, k_deactivated_components=k_deactivated_components
-        )
-        _apply_receptive_field_masks(
-            model,
-            RF_BLOCK1_INACTIVE,
-            RF_BLOCK2_INACTIVE,
-            RF_INACTIVE_VALUE,
-        )
-        return model
-
-
-# %% [markdown]
 # ### 5.6 Default run order and helpers
 #
 # **`ALL_ARCHITECTURE_CLASSES`** fixes the canonical training order; **`ARCHITECTURE_BY_SLUG`** and
@@ -634,29 +547,11 @@ class TwoLayerReceptiveFieldArchitecture:
 ALL_ARCHITECTURE_CLASSES: tuple[type, ...] = (
     SingleSupErosionsArchitecture,
     TwoLayerSupErosionsArchitecture,
-    TwoLayerReceptiveFieldArchitecture,
 )
 
 ARCHITECTURE_BY_SLUG: dict[str, type] = {c.slug: c for c in ALL_ARCHITECTURE_CLASSES}
 
 PREFERRED_MODEL_ORDER: tuple[str, ...] = tuple(c.slug for c in ALL_ARCHITECTURE_CLASSES)
-
-
-def parse_models_to_train(models: Sequence[str] | None) -> list[type]:
-    if models is None:
-        return list(ALL_ARCHITECTURE_CLASSES)
-    seen: set[str] = set()
-    out: list[type] = []
-    for s in models:
-        key = str(s).strip()
-        if key not in ARCHITECTURE_BY_SLUG:
-            raise ValueError(
-                f"Unknown model slug {key!r}. Use one of: {list(ARCHITECTURE_BY_SLUG.keys())}"
-            )
-        if key not in seen:
-            seen.add(key)
-            out.append(ARCHITECTURE_BY_SLUG[key])
-    return out
 
 
 def comparison_plot_slugs(suite: dict) -> list[str]:
@@ -776,7 +671,7 @@ STRUCTURING_ELEMENT_PAIR_SPECS: tuple[dict[str, Any], ...] = (
 INDEPENDENT_STRUCTURING_ELEMENT_PAIR_KEY = "cross_sum_vs_max_corners_center"
 
 WEIGHT_PAIR_SNAPSHOT_EPOCHS: tuple[int, ...] = (0, 10, 50, 100, 500)
-MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE = 20
+MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE = 25
 
 
 def extract_structuring_element_pair_values(weights_5d: np.ndarray) -> dict[str, np.ndarray]:
@@ -988,7 +883,6 @@ def build_training_callbacks(
     if canonical_architecture_slug(model_slug) in {
         SingleSupErosionsArchitecture.slug,
         TwoLayerSupErosionsArchitecture.slug,
-        TwoLayerReceptiveFieldArchitecture.slug,
     }:
         cbs.append(MinimalElementsLoggerCallback())
     if canonical_architecture_slug(model_slug) == SingleSupErosionsArchitecture.slug:
@@ -1116,115 +1010,6 @@ def train_model(
 # Orchestration only: build each model, attach callbacks, call **`train_model`**, collect histories and **val MSE**.
 
 # %%
-def train_and_eval_suite(
-    pack: dict,
-    y_train: np.ndarray,
-    y_val: np.ndarray,
-    *,
-    models_to_train: Sequence[str] | None = None,
-    kernel_size: tuple[int, int] = KERNEL_SIZE,
-    epochs: int = EPOCHS_MAIN,
-    batch_size: int = BATCH_SIZE,
-    lr: float = LEARNING_RATE,
-    verbose: int = 1,
-    checkpoint_root: Path | None = None,
-    callback_mode: str = TRAINING_CALLBACK_MODE,
-    val_loss_threshold: float | None = VAL_LOSS_EARLY_STOP_THRESHOLD,
-    early_stopping_patience: int = EARLY_STOPPING_PATIENCE,
-    early_stopping_min_delta: float = EARLY_STOPPING_MIN_DELTA,
-    early_stopping_restore_best_weights: bool = EARLY_STOPPING_RESTORE_BEST_WEIGHTS,
-    update_rule: str = TRAINING_UPDATE_RULE,
-    sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
-    sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
-    sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
-    k_deactivated_components: int = 0,
-) -> dict:
-    h_in = int(pack["H"])
-    w_in = int(pack["W"])
-    x_tr = pack["x_train"]
-    x_va = pack["x_val"]
-    input_shape = (h_in, w_in, 1)
-    arch_list = parse_models_to_train(models_to_train)
-    ck = checkpoint_root
-    results: dict = {
-        "input_shape": input_shape,
-        "histories": {},
-        "val_mse": {},
-        "models": {},
-        "weight_pair_logs": {},
-        "minimal_elements_logs": {},
-        "models_to_train": [c.slug for c in arch_list],
-        "checkpoint_root": str(ck) if ck is not None else None,
-        "update_rule": str(update_rule),
-        "sparse_mask_min": float(sparse_mask_min),
-        "sparse_mask_max": float(sparse_mask_max),
-        "sparse_grad_zero_atol": float(sparse_grad_zero_atol),
-        "k_deactivated_components": int(k_deactivated_components),
-    }
-
-    def _cbs(name: str) -> list[keras.callbacks.Callback]:
-        return build_training_callbacks(
-            ck,
-            name,
-            mode=callback_mode,
-            val_loss_threshold=val_loss_threshold,
-            patience=early_stopping_patience,
-            min_delta=early_stopping_min_delta,
-            restore_best_weights=early_stopping_restore_best_weights,
-        )
-
-    for arch_cls in arch_list:
-        slug = arch_cls.slug
-        model = arch_cls.build(
-            input_shape,
-            kernel_size,
-            k_deactivated_components=k_deactivated_components,
-        )
-        disp = arch_cls.display_name
-        print("\n" + "=" * 72)
-        print(f"Model — before training: {disp} ({slug})")
-        print("=" * 72)
-        model.summary()
-        callbacks = _cbs(slug)
-        history, val_mse = train_model(
-            model,
-            x_tr,
-            y_train,
-            x_va,
-            y_val,
-            name=slug,
-            ck_root=ck,
-            lr=lr,
-            epochs=epochs,
-            batch_size=batch_size,
-            verbose=verbose,
-            callbacks=callbacks,
-            update_rule=update_rule,
-            sparse_mask_min=sparse_mask_min,
-            sparse_mask_max=sparse_mask_max,
-            sparse_grad_zero_atol=sparse_grad_zero_atol,
-        )
-        pair_logger = next(
-            (cb for cb in callbacks if isinstance(cb, StructuringElementPairLoggerCallback)),
-            None,
-        )
-        minimal_logger = next(
-            (cb for cb in callbacks if isinstance(cb, MinimalElementsLoggerCallback)),
-            None,
-        )
-        results["histories"][slug] = history
-        results["models"][slug] = model
-        results["val_mse"][slug] = val_mse
-        if pair_logger is not None:
-            results["weight_pair_logs"][slug] = pair_logger.export_data()
-        if minimal_logger is not None:
-            results["minimal_elements_logs"][slug] = minimal_logger.export_data()
-        print(f"\n--- After training: {disp} ({slug}) ---")
-        print(f"  Validation MSE: {val_mse:.6f}")
-
-    return results
-
-
 def train_and_eval_k_deactivated_variants_suite(
     pack: dict,
     y_train: np.ndarray,
@@ -2196,7 +1981,6 @@ def plot_suite_structuring_elements(
             )
         elif canon in (
             TwoLayerSupErosionsArchitecture.slug,
-            TwoLayerReceptiveFieldArchitecture.slug,
         ):
             for _branch, layer_name in ((1, "Erosions1"), (2, "Erosions2")):
                 w = m.get_layer(layer_name).get_weights()[0]
@@ -2263,6 +2047,8 @@ def run_comparison_plots(
     n_pred_samples: int = 4,
     training_overlay_slugs: Sequence[str] | None = None,
     prediction_grid_slugs: Sequence[str] | None = None,
+    include_minimal_elements_overlay: bool = True,
+    include_structuring_element_plots: bool = True,
 ) -> list[Path]:
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
@@ -2291,14 +2077,15 @@ def run_comparison_plots(
             model_slugs=overlay_slugs,
         )
         saved.append(plots_dir / "four_pixel_three_way_overlay_log.png")
-        plot_minimal_elements_overlay(
-            suite,
-            save_path=plots_dir / "minimal_elements_overlay.png",
-            title=f"{target_label} — minimal elements over training",
-            model_slugs=overlay_slugs,
-            epoch_stride=MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE,
-        )
-        saved.append(plots_dir / "minimal_elements_overlay.png")
+        if include_minimal_elements_overlay:
+            plot_minimal_elements_overlay(
+                suite,
+                save_path=plots_dir / "minimal_elements_overlay.png",
+                title=f"{target_label} — minimal elements over training",
+                model_slugs=overlay_slugs,
+                epoch_stride=MINIMAL_ELEMENTS_LOG_EPOCH_STRIDE,
+            )
+            saved.append(plots_dir / "minimal_elements_overlay.png")
 
     save_per_model_curves(suite, plots_dir)
     for name in (suite.get("histories") or {}):
@@ -2322,13 +2109,14 @@ def run_comparison_plots(
         )
         saved.append(plots_dir / "four_pixel_prediction_three_way.png")
 
-    se_paths = plot_suite_structuring_elements(
-        suite,
-        plots_dir,
-        experiment_label=target_label,
-        show=show,
-    )
-    saved.extend(se_paths)
+    if include_structuring_element_plots:
+        se_paths = plot_suite_structuring_elements(
+            suite,
+            plots_dir,
+            experiment_label=target_label,
+            show=show,
+        )
+        saved.extend(se_paths)
     return [p for p in saved if Path(p).exists()]
 
 
@@ -2363,6 +2151,7 @@ def run_comparison_plots(
 def build_experiment_metadata(
     run_dir: Path, pack: dict, suite: dict, *, target_meta: dict[str, Any]
 ) -> dict:
+    dataset_size_meta = int(pack["x_train"].shape[0]) if "x_train" in pack else int(DATASET_SIZE)
     meta = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "run_dir": str(run_dir.resolve()),
@@ -2387,7 +2176,7 @@ def build_experiment_metadata(
             "val_loss_threshold": VAL_LOSS_EARLY_STOP_THRESHOLD,
             "training_callback_mode": TRAINING_CALLBACK_MODE,
             "noise_sigma": NOISE_SIGMA,
-            "dataset_size": DATASET_SIZE,
+            "dataset_size": dataset_size_meta,
             "rf_block1_inactive": RF_BLOCK1_INACTIVE,
             "rf_block2_inactive": RF_BLOCK2_INACTIVE,
             "training_update_rule": suite.get("update_rule", TRAINING_UPDATE_RULE),
@@ -2447,136 +2236,12 @@ def print_experiment_summary(run_dir: Path, suite: dict) -> None:
         print(f"  {slug}: val_mse = {suite['val_mse'].get(slug, float('nan')):.6f}")
     print("=" * 72 + "\n")
 
-
 # %%
-def run_k_deactivated_initialization_experiment(
-    out_dir: Path | str | None = None,
-    *,
-    notebook: bool = False,
-    dated_subdir: bool = True,
-    k_values: Sequence[int] | None = None,
-    training_seed: int | None = None,
-    update_rule: str = TRAINING_UPDATE_RULE,
-    sparse_mask_min: float = SPARSE_SUBMODEL_MASK_MIN,
-    sparse_mask_max: float = SPARSE_SUBMODEL_MASK_MAX,
-    sparse_grad_zero_atol: float = SPARSE_GRAD_ZERO_ATOL,
-) -> dict[str, Any]:
-    """
-    Single experiment run (same layout as ``run_experiment``): one ``run_dir``,
-    data loaded once, then **10** trainings — each base architecture with
-    ``k_deactivated_components`` in ``{0,1,2,3,4}``. Model keys are
-    ``{base}__kd{k}`` (e.g. ``single_sup__kd0`` is normal init).
-
-    Combined plots (e.g. ``val_loss_overlay.png``) include **all** variants.
-    """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    if training_seed is not None:
-        keras.utils.set_random_seed(int(training_seed))
-
-    parent = Path(out_dir).expanduser()
-    parent.mkdir(parents=True, exist_ok=True)
-    prefix = f"exp_{EXPERIMENT_TARGET_SLUG}_k_deactivated_grid"
-    if dated_subdir:
-        run_dir = new_dated_experiment_dir(parent, prefix)
-    else:
-        run_dir = parent
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "plots").mkdir(exist_ok=True)
-        (run_dir / "checkpoints").mkdir(exist_ok=True)
-
-    plots_dir = run_dir / "plots"
-    ck_root = run_dir / "checkpoints"
-
-    arch_slugs = [
-        SingleSupErosionsArchitecture.slug,
-        TwoLayerSupErosionsArchitecture.slug,
-    ]
-    ks = [0, 1, 2, 3, 4] if k_values is None else [int(x) for x in k_values]
-
-    pack = load_fashion_mnist_four_pixel_pack(seed=DATA_LOAD_SEED)
-    y_train, y_val, _y_test, target_meta = compute_experiment_targets(pack)
-
-    print("Target:", target_meta["target_key"], "—", target_meta["target_label"])
-    print("K-deactivated grid: architectures", arch_slugs, "k_values", ks)
-    print("Shapes: x_train", pack["x_train"].shape, "y_train", y_train.shape)
-    print("Experiment run directory:", run_dir)
-
-    suite = train_and_eval_k_deactivated_variants_suite(
-        pack,
-        y_train,
-        y_val,
-        base_arch_slugs=arch_slugs,
-        k_values=ks,
-        epochs=EPOCHS_MAIN,
-        batch_size=BATCH_SIZE,
-        lr=LEARNING_RATE,
-        verbose=1,
-        checkpoint_root=ck_root,
-        update_rule=update_rule,
-        sparse_mask_min=sparse_mask_min,
-        sparse_mask_max=sparse_mask_max,
-        sparse_grad_zero_atol=sparse_grad_zero_atol,
-    )
-    suite["experiment_run_dir"] = str(run_dir.resolve())
-    if training_seed is not None:
-        suite["training_seed"] = int(training_seed)
-    variant_slugs = list(suite["models_to_train"])
-
-    weight_pair_log_files = save_weight_pair_logs(suite, run_dir / "weight_pair_logs")
-    suite["weight_pair_logs_dir"] = str((run_dir / "weight_pair_logs").resolve())
-    suite["weight_pair_log_files"] = [str(p.relative_to(run_dir)) for p in weight_pair_log_files]
-    write_metrics_and_metadata(run_dir, pack, suite, target_meta=target_meta)
-    run_comparison_plots(
-        suite,
-        pack,
-        y_val,
-        plots_dir,
-        target_label=target_meta["target_label"],
-        show=False,
-        n_pred_samples=min(4, len(y_val)),
-        training_overlay_slugs=variant_slugs,
-        prediction_grid_slugs=variant_slugs,
-    )
-    print_experiment_summary(run_dir, suite)
-
-    summary = {
-        "protocol": suite.get("protocol", "k_deactivated_initialization_grid"),
-        "run_dir": str(run_dir.resolve()),
-        "architectures": arch_slugs,
-        "k_values": ks,
-        "variant_slugs": variant_slugs,
-        "val_mse": {k: float(v) for k, v in suite.get("val_mse", {}).items()},
-    }
-    summary_path = run_dir / "k_deactivated_summary.json"
-    with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2)
-
-    if notebook:
-        try:
-            from IPython.display import Image, Markdown, display
-
-            display(Markdown(f"**K-deactivated run:** `{run_dir}`"))
-            display(Markdown(f"**Summary:** `{summary_path}`"))
-            display(Markdown(f"**Figures:** `{plots_dir}`"))
-            for p in sorted(plots_dir.glob("*.png")):
-                display(Image(filename=str(p)))
-        except ImportError:
-            pass
-
-    return {
-        "suite": suite,
-        "run_dir": str(run_dir.resolve()),
-        "summary_path": str(summary_path.resolve()),
-        "summary": summary,
-    }
-
-
 def run_k_deactivated_initialization_experiment_repeated(
     out_dir: Path | str | None = None,
     *,
     n_repetitions: int | None = None,
+    dataset_size: int = DATASET_SIZE,
     data_seed: int = DATA_LOAD_SEED,
     training_seed_base: int = RANDOM_SEED,
     training_seed_step: int = TRAINING_SEED_STEP,
@@ -2608,26 +2273,35 @@ def run_k_deactivated_initialization_experiment_repeated(
         run_dir = parent
         run_dir.mkdir(parents=True, exist_ok=True)
 
-    arch_slugs = [
-        SingleSupErosionsArchitecture.slug,
-        TwoLayerSupErosionsArchitecture.slug,
-    ]
-    ks = [0, 1, 2, 3, 4] if k_values is None else [int(x) for x in k_values]
+    arch_k_grid: dict[str, list[int]] = {
+        SingleSupErosionsArchitecture.slug: [0],
+        TwoLayerSupErosionsArchitecture.slug: (
+            [0, 1, 2, 3] if k_values is None else [int(x) for x in k_values]
+        ),
+    }
 
-    pack = load_fashion_mnist_four_pixel_pack(seed=data_seed)
+    if int(dataset_size) < 1:
+        raise ValueError("dataset_size must be >= 1")
+    pack = load_fashion_mnist_four_pixel_pack(
+        dataset_size=int(dataset_size),
+        seed=data_seed,
+    )
     y_train, y_val, _y_test, target_meta = compute_experiment_targets(pack)
     q_thresh = float(VAL_LOSS_EARLY_STOP_THRESHOLD)
     per_rep: list[dict[str, Any]] = []
     last_suite: dict[str, Any] = {}
+    repetition_dirs: list[str] = []
 
     print("Target:", target_meta["target_key"], "—", target_meta["target_label"])
-    print("K-deactivated repeated grid: architectures", arch_slugs, "k_values", ks)
+    print("K-deactivated repeated grid:", arch_k_grid)
+    print("Dataset size:", int(dataset_size))
     print("Shapes: x_train", pack["x_train"].shape, "y_train", y_train.shape)
     print("Repeated run directory:", run_dir)
 
     for rep in range(n):
         rep_tag = f"rep_{rep:02d}"
         rep_dir = run_dir / rep_tag
+        repetition_dirs.append(str(rep_dir.resolve()))
         plots_dir = rep_dir / "plots"
         ck_root = rep_dir / "checkpoints"
         plots_dir.mkdir(parents=True, exist_ok=True)
@@ -2639,22 +2313,32 @@ def run_k_deactivated_initialization_experiment_repeated(
         print(
             f"\n{'=' * 72}\nK-deactivated repetition {rep + 1}/{n}  (training seed={rep_training_seed})\n{'=' * 72}"
         )
-        suite = train_and_eval_k_deactivated_variants_suite(
-            pack,
-            y_train,
-            y_val,
-            base_arch_slugs=arch_slugs,
-            k_values=ks,
-            epochs=EPOCHS_MAIN,
-            batch_size=BATCH_SIZE,
-            lr=LEARNING_RATE,
-            verbose=1,
-            checkpoint_root=ck_root,
-            update_rule=update_rule,
-            sparse_mask_min=sparse_mask_min,
-            sparse_mask_max=sparse_mask_max,
-            sparse_grad_zero_atol=sparse_grad_zero_atol,
-        )
+        per_arch_suites: list[dict[str, Any]] = []
+        for arch_slug, arch_ks in arch_k_grid.items():
+            per_arch_suites.append(
+                train_and_eval_k_deactivated_variants_suite(
+                    pack,
+                    y_train,
+                    y_val,
+                    base_arch_slugs=[arch_slug],
+                    k_values=arch_ks,
+                    epochs=EPOCHS_MAIN,
+                    batch_size=BATCH_SIZE,
+                    lr=LEARNING_RATE,
+                    verbose=1,
+                    checkpoint_root=ck_root,
+                    update_rule=update_rule,
+                    sparse_mask_min=sparse_mask_min,
+                    sparse_mask_max=sparse_mask_max,
+                    sparse_grad_zero_atol=sparse_grad_zero_atol,
+                )
+            )
+        suite = dict(per_arch_suites[0])
+        for extra_suite in per_arch_suites[1:]:
+            for key in ("histories", "val_mse", "models", "weight_pair_logs", "minimal_elements_logs"):
+                suite[key].update(extra_suite[key])
+            suite["models_to_train"].extend(extra_suite["models_to_train"])
+            suite["initialization_variants"].extend(extra_suite["initialization_variants"])
         suite["experiment_run_dir"] = str(rep_dir.resolve())
         suite["repetition_index"] = rep
         suite["training_seed"] = rep_training_seed
@@ -2674,16 +2358,55 @@ def run_k_deactivated_initialization_experiment_repeated(
             n_pred_samples=min(4, len(y_val)),
             training_overlay_slugs=variant_slugs,
             prediction_grid_slugs=variant_slugs,
+            include_minimal_elements_overlay=True,
+            include_structuring_element_plots=False,
         )
 
         val_mse = dict(suite.get("val_mse", {}))
         success = {slug: float(val_mse[slug]) < q_thresh for slug in val_mse}
+        histories_json = histories_to_json_safe(suite.get("histories", {}))
+        threshold_progress: dict[str, dict[str, Any]] = {}
+        for slug in val_mse:
+            hist = histories_json.get(slug, {})
+            val_loss_curve = [float(v) for v in hist.get("val_loss", [])]
+            epochs_ran = int(len(val_loss_curve))
+            reached_threshold = any(v <= q_thresh for v in val_loss_curve)
+            first_reached_epoch = next(
+                (int(i + 1) for i, v in enumerate(val_loss_curve) if v <= q_thresh),
+                None,
+            )
+            reached_before_max_epochs = (
+                reached_threshold
+                and first_reached_epoch is not None
+                and first_reached_epoch < int(EPOCHS_MAIN)
+            )
+            threshold_progress[slug] = {
+                "epochs_ran": epochs_ran,
+                "reached_threshold_during_training": bool(reached_threshold),
+                "first_epoch_reaching_threshold": first_reached_epoch,
+                "reached_before_max_epochs": bool(reached_before_max_epochs),
+            }
+        metadata_path = rep_dir / "metadata.json"
+        metrics_path = rep_dir / "metrics.json"
+        minimal_logs_path = rep_dir / "minimal_elements_logs.json"
         per_rep.append(
             {
                 "repetition": rep,
                 "training_seed": rep_training_seed,
+                "run_dir": str(rep_dir.resolve()),
                 "val_mse": {k: float(v) for k, v in val_mse.items()},
                 "success": success,
+                "threshold_progress": threshold_progress,
+                "models_trained": list(suite.get("models_to_train", [])),
+                "saved_artifacts": {
+                    "metadata_json": str(metadata_path.resolve()),
+                    "metrics_json": str(metrics_path.resolve()),
+                    "minimal_elements_logs_json": str(minimal_logs_path.resolve()),
+                    "plots_dir": str(plots_dir.resolve()),
+                    "checkpoints_dir": str(ck_root.resolve()),
+                    "weight_pair_logs_dir": suite.get("weight_pair_logs_dir"),
+                    "weight_pair_log_files": list(suite.get("weight_pair_log_files", [])),
+                },
             }
         )
         last_suite = suite
@@ -2693,23 +2416,59 @@ def run_k_deactivated_initialization_experiment_repeated(
     for slug in slugs:
         vals = np.array([float(r["val_mse"][slug]) for r in per_rep], dtype=np.float64)
         successes = sum(1 for r in per_rep if r["success"][slug])
+        reached_threshold_count = sum(
+            1
+            for r in per_rep
+            if bool(
+                (r.get("threshold_progress", {}).get(slug, {})).get(
+                    "reached_threshold_during_training", False
+                )
+            )
+        )
+        reached_before_max_count = sum(
+            1
+            for r in per_rep
+            if bool(
+                (r.get("threshold_progress", {}).get(slug, {})).get(
+                    "reached_before_max_epochs", False
+                )
+            )
+        )
         std = float(vals.std(ddof=1)) if n > 1 else 0.0
         aggregate[slug] = {
             "mean_val_mse": float(vals.mean()),
             "std_val_mse": std,
             "success_rate": successes / n,
             "n_successes": int(successes),
+            "reached_threshold_during_training_rate": reached_threshold_count / n,
+            "n_reached_threshold_during_training": int(reached_threshold_count),
+            "reached_before_max_epochs_rate": reached_before_max_count / n,
+            "n_reached_before_max_epochs": int(reached_before_max_count),
         }
 
     summary: dict[str, Any] = {
         "protocol": "k_deactivated_initialization_grid_repeated",
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "run_dir": str(run_dir.resolve()),
+        "summary_file": str((run_dir / "k_deactivated_repetitions_summary.json").resolve()),
         "n_repetitions": n,
         "Q": q_thresh,
+        "dataset": pack.get("dataset"),
+        "img_size": [int(pack["H"]), int(pack["W"])],
+        "target_key": target_meta.get("target_key"),
+        "target_label": target_meta.get("target_label"),
+        "dataset_size": int(dataset_size),
         "data_seed": int(data_seed),
         "training_seed_base": int(training_seed_base),
         "training_seed_step": int(training_seed_step),
-        "architectures": arch_slugs,
-        "k_values": ks,
+        "architectures": list(arch_k_grid.keys()),
+        "k_values": sorted({int(k) for ks_arch in arch_k_grid.values() for k in ks_arch}),
+        "k_values_by_architecture": {k: list(v) for k, v in arch_k_grid.items()},
+        "update_rule": str(update_rule),
+        "sparse_mask_min": float(sparse_mask_min),
+        "sparse_mask_max": float(sparse_mask_max),
+        "sparse_grad_zero_atol": float(sparse_grad_zero_atol),
+        "repetition_dirs": repetition_dirs,
         "per_repetition": per_rep,
         "aggregate": aggregate,
     }
@@ -2724,7 +2483,12 @@ def run_k_deactivated_initialization_experiment_repeated(
         a = aggregate[slug]
         print(
             f"  {slug}: mean val_mse={a['mean_val_mse']:.6f} ± {a['std_val_mse']:.6f}, "
-            f"success_rate={a['success_rate']:.2f}"
+            f"success_rate(final<{q_thresh:.6f})={a['success_rate']:.2f} "
+            f"({a['n_successes']}/{n}), "
+            f"reached_threshold_during_training={a['reached_threshold_during_training_rate']:.2f} "
+            f"({a['n_reached_threshold_during_training']}/{n}), "
+            f"reached_before_EPOCHS_MAIN({EPOCHS_MAIN})={a['reached_before_max_epochs_rate']:.2f} "
+            f"({a['n_reached_before_max_epochs']}/{n})"
         )
     print("=" * 72 + "\n")
 
@@ -2749,6 +2513,13 @@ def regenerate_experiment_plots(
     run_dir: Path | str,
     *,
     show: bool = False,
+    output_subdir: str = "regenerate_plots",
+    data_seed: int | None = None,
+    n_pred_samples: int = 4,
+    include_minimal_elements_overlay: bool = True,
+    include_structuring_element_plots: bool = True,
+    training_overlay_slugs: Sequence[str] | None = None,
+    prediction_grid_slugs: Sequence[str] | None = None,
 ) -> None:
     """
     Regenerate all plots for an existing experiment directory.
@@ -2820,7 +2591,7 @@ def regenerate_experiment_plots(
     def _process_single_run(local_dir: Path):
         print(f"\nProcessing: {local_dir}")
 
-        plots_dir = local_dir / "regenerate_plots"
+        plots_dir = local_dir / output_subdir
         plots_dir.mkdir(parents=True, exist_ok=True)
 
         # --- load metadata ---
@@ -2854,7 +2625,15 @@ def regenerate_experiment_plots(
         suite.setdefault("models", {})
 
         # --- reload dataset (needed for prediction plots) ---
-        pack = load_fashion_mnist_four_pixel_pack(seed=DATA_LOAD_SEED)
+        metadata_hparams = metadata.get("hyperparameters", {})
+        resolved_data_seed = data_seed
+        if resolved_data_seed is None:
+            resolved_data_seed = metadata_hparams.get("data_load_seed", DATA_LOAD_SEED)
+        resolved_dataset_size = metadata_hparams.get("dataset_size", DATASET_SIZE)
+        pack = load_fashion_mnist_four_pixel_pack(
+            dataset_size=int(resolved_dataset_size),
+            seed=int(resolved_data_seed),
+        )
         _, y_val, _y_test, target_meta = compute_experiment_targets(pack)
         input_shape = (int(pack["H"]), int(pack["W"]), 1)
 
@@ -2888,6 +2667,18 @@ def regenerate_experiment_plots(
 
         # --- regenerate comparison plots ---
         plot_slugs = [str(s) for s in metadata.get("models_trained", []) if str(s).strip()]
+        if not plot_slugs:
+            plot_slugs = [str(s) for s in suite.get("histories", {}) if str(s).strip()]
+        overlay_slugs_local = (
+            [str(s) for s in training_overlay_slugs]
+            if training_overlay_slugs is not None
+            else plot_slugs or None
+        )
+        prediction_slugs_local = (
+            [str(s) for s in prediction_grid_slugs]
+            if prediction_grid_slugs is not None
+            else plot_slugs or None
+        )
         run_comparison_plots(
             suite,
             pack,
@@ -2895,9 +2686,11 @@ def regenerate_experiment_plots(
             plots_dir,
             target_label=target_meta["target_label"],
             show=show,
-            n_pred_samples=min(4, len(y_val)),
-            training_overlay_slugs=plot_slugs or None,
-            prediction_grid_slugs=plot_slugs or None,
+            n_pred_samples=min(int(n_pred_samples), len(y_val)),
+            training_overlay_slugs=overlay_slugs_local,
+            prediction_grid_slugs=prediction_slugs_local,
+            include_minimal_elements_overlay=include_minimal_elements_overlay,
+            include_structuring_element_plots=include_structuring_element_plots,
         )
 
         print(f"Done: {local_dir}")
@@ -2934,12 +2727,14 @@ from google.colab import drive
 drive.mount('/content/drive')
 
 # %%
-run_k_deactivated_initialization_experiment_repeated(
-    out_dir='/content/outputs',
-    n_repetitions=N_TRAINING_REPETITIONS,
-    notebook=False,
-    dated_subdir=True,
-)
+for ds in (100, 500, 1000):
+    run_k_deactivated_initialization_experiment_repeated(
+        out_dir="/content/outputs",
+        n_repetitions=N_TRAINING_REPETITIONS,
+        dataset_size=ds,
+        notebook=False,
+        dated_subdir=True,
+    )
 
 # %%
 # !cp -r '/content/outputs/' '/content/drive/MyDrive/experiments-dima-cluster/'
