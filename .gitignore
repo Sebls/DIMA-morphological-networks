@@ -99,3 +99,8 @@ tmp/
 scripts/
 notebooks/dataset/
 notebooks/outputs/
+
+*.ipynb
+/paper/
+/results/
+/outputs/
